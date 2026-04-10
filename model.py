@@ -383,3 +383,19 @@ class EconomyModel(Model):
 
         self.cycle += 1
         self.datacollector.collect(self)
+
+    # ─────────────────────────────────────────────
+    # 政策干预方法
+    # ─────────────────────────────────────────────
+
+    def adjust_interest_rate(self, delta: float):
+        """调整基准利率（delta 正值=加息，负值=降息）"""
+        self.base_interest_rate = max(0.0, min(0.25, self.base_interest_rate + delta))
+
+    def adjust_tax_rate(self, delta: float):
+        """调整税率（delta 正值=加税，负值=减税）"""
+        self.tax_rate = max(0.0, min(0.45, self.tax_rate + delta))
+
+    def adjust_subsidy(self, delta: float):
+        """调整失业补贴"""
+        self.subsidy = max(0.0, min(50.0, self.subsidy + delta))

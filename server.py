@@ -6,6 +6,7 @@ Open: http://127.0.0.1:8521
 
 from __future__ import annotations
 
+import io
 import logging
 from typing import Any
 
@@ -181,6 +182,71 @@ def MacroStats(model: Model):
     solara.HTML(tag="div", unsafe_innerHTML=html)
 
 
+@solara.component
+def PolicyPanel(model: Model):
+    """政策干预面板：降息/加息、减税/加税、调整补贴"""
+    
+    def on_cut_rate():
+        model.adjust_interest_rate(-0.005)  # 降息 50BP
+        logger.info("Policy: Rate cut 50BP → %.1f%%", model.base_interest_rate * 100)
+    
+    def on_hike_rate():
+        model.adjust_interest_rate(0.005)  # 加息 50BP
+        logger.info("Policy: Rate hike 50BP → %.1f%%", model.base_interest_rate * 100)
+    
+    def on_cut_tax():
+        model.adjust_tax_rate(-0.05)  # 减税 5%
+        logger.info("Policy: Tax cut 5%% → %.1f%%", model.tax_rate * 100)
+    
+    def on_hike_tax():
+        model.adjust_tax_rate(0.05)  # 加税 5%
+        logger.info("Policy: Tax hike 5%% → %.1f%%", model.tax_rate * 100)
+    
+    def on_add_subsidy():
+        model.adjust_subsidy(5.0)  # 增发补贴
+        logger.info("Policy: Subsidy +5 → %.1f", model.subsidy)
+    
+    def on_cut_subsidy():
+        model.adjust_subsidy(-5.0)  # 削减补贴
+        logger.info("Policy: Subsidy -5 → %.1f", model.subsidy)
+    
+    with solara.Row(gap="8px"):
+        solara.Button("Cut Rate 50BP", on_click=on_cut_rate, color="primary")
+        solara.Button("Hike Rate 50BP", on_click=on_hike_rate, color="primary")
+        solara.Button("Cut Tax 5%", on_click=on_cut_tax, color="success")
+        solara.Button("Hike Tax 5%", on_click=on_hike_tax, color="error")
+        solara.Button("+Subsidy 5", on_click=on_add_subsidy, color="warning")
+        solara.Button("-Subsidy 5", on_click=on_cut_subsidy, color="warning")
+
+
+@solara.component
+def ExportPanel(model: Model):
+    """数据导出面板"""
+    
+    def export_csv():
+        """导出模型数据为 CSV"""
+        try:
+            df_model = model.datacollector.get_model_vars_dataframe()
+            df_agents = model.datacollector.get_agent_vars_dataframe()
+            
+            # 合并到一个 StringIO
+            buffer = io.StringIO()
+            buffer.write("# Model-level metrics\n")
+            df_model.to_csv(buffer)
+            buffer.write("\n# Agent-level data\n")
+            df_agents.to_csv(buffer)
+            
+            logger.info("Exported %d model rows, %d agent rows", len(df_model), len(df_agents))
+            # Solara 的文件下载需要通过 solara.FileDownload 组件
+            # 这里先只打印日志，实际下载需要额外处理
+        except Exception as e:
+            logger.error("Export failed: %s", e)
+    
+    with solara.Row():
+        solara.Button("Export CSV", on_click=export_csv, color="primary", icon_name="mdi-download")
+        solara.Text(f"Cycle: {getattr(model, 'cycle', 0)}")
+
+
 # ─────────────────────────────────────────────
 # 初始化
 # ─────────────────────────────────────────────
@@ -202,7 +268,12 @@ logger.info("Starting SolaraViz on http://127.0.0.1:8521 ...")
 page = SolaraViz(
     model,
     renderer=None,
-    components=[MacroStats, *chart_components],
+    components=[
+        MacroStats,
+        PolicyPanel,
+        ExportPanel,
+        *chart_components,
+    ],
     model_params=model_params,
     name=APP_NAME,
     play_interval=PLAY_INTERVAL_MS,
