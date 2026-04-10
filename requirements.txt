@@ -1,0 +1,5 @@
+mesa[rec]==3.5.1
+solara==1.56.0
+numpy==1.26.4
+pandas==3.0.2
+matplotlib==3.10.8
