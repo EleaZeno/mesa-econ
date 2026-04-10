@@ -4,163 +4,208 @@ Run: solara run server.py
 Open: http://127.0.0.1:8521
 """
 
+from __future__ import annotations
+
+import logging
+from typing import Any
+
 import solara
 from mesa import Model
 from mesa.visualization import SolaraViz
 from mesa.visualization import make_plot_component
+
 from model import EconomyModel, Household, Firm, Bank, Trader
 
-
 # ─────────────────────────────────────────────
-# Custom Solara Component: Macro Stats Panel
+# 日志配置
 # ─────────────────────────────────────────────
 
-@solara.component
-def MacroStats(model: Model):
-    """Real-time macro statistics panel"""
-    firms = [a for a in model.agents if isinstance(a, Firm)]
-    households = [a for a in model.agents if isinstance(a, Household)]
-    traders = [a for a in model.agents if isinstance(a, Trader)]
-    employed = sum(1 for h in households if h.employed)
-    total_prod = sum(f.production for f in firms)
-    total_div = model.total_dividends
-    n_unemployed = len(households) - employed
-
-    solara.HTML(
-        tag="div",
-        unsafe_innerHTML=(
-            f"<div style='background:linear-gradient(135deg,#0f172a,#1e3a5f);"
-            f"color:#e2e8f0;border-radius:12px;padding:18px 20px;"
-            f"font-family:Segoe UI,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,0.3);line-height:2;'>"
-            f"<div style='font-size:16px;font-weight:700;margin-bottom:10px;"
-            f"border-bottom:1px solid #334155;padding-bottom:8px;'>"
-            f"Macro Snapshot - Cycle {model.cycle}</div>"
-            f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;font-size:13px;'>"
-            f"<div>Firms: {len(firms)}</div>"
-            f"<div>Employment: {employed}/{len(households)} ({employed/len(households)*100:.0f}%)</div>"
-            f"<div>Unemployed: {n_unemployed}</div>"
-            f"<div>Traders: {len(traders)}</div>"
-            f"<div>Output: {total_prod:.1f}</div>"
-            f"<div>Dividends: {total_div:.1f}</div>"
-            f"<div>Tax Rate: {model.tax_rate:.0%}</div>"
-            f"<div>Interest Rate: {model.base_interest_rate:.0%}</div>"
-            f"<div>Price Index: {model.price_index:.2f}</div>"
-            f"<div>Gov Revenue: {model.govt_revenue:.1f}</div>"
-            f"<div>Loans: {model.total_loans_outstanding:.1f}</div>"
-            f"</div></div>"
-        ),
-    )
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────
-# Chart Components (matplotlib backend for stability)
+# 全局配置（消除硬编码）
 # ─────────────────────────────────────────────
 
-chart_stock = make_plot_component("stock_price", backend="matplotlib")
-chart_gdp = make_plot_component("gdp", backend="matplotlib")
-chart_unemp = make_plot_component("unemployment", backend="matplotlib")
-chart_price = make_plot_component("price_index", backend="matplotlib")
-chart_gini = make_plot_component("gini", backend="matplotlib")
-chart_orders = make_plot_component("buy_orders", backend="matplotlib")
-chart_loans = make_plot_component("loans", backend="matplotlib")
+# 可视化配置
+PLAY_INTERVAL_MS = 200
+APP_NAME = "Economic Sandbox"
 
+# 样式常量
+STYLE_CONTAINER = (
+    "background:linear-gradient(135deg,#0f172a,#1e3a5f);"
+    "color:#e2e8f0;border-radius:12px;padding:18px 20px;"
+    "font-family:Segoe UI,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,0.3);"
+    "line-height:2;"
+)
+STYLE_HEADER = (
+    "font-size:16px;font-weight:700;margin-bottom:10px;"
+    "border-bottom:1px solid #334155;padding-bottom:8px;"
+)
+STYLE_GRID = (
+    "display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;font-size:13px;"
+)
 
-# ─────────────────────────────────────────────
-# Model Parameters (Sliders)
-# ─────────────────────────────────────────────
+# 图表列表（新增/删除图表只需改这里）
+CHART_NAMES = (
+    "stock_price",
+    "gdp",
+    "unemployment",
+    "price_index",
+    "gini",
+    "buy_orders",
+    "loans",
+)
 
-model_params = {
-    "n_households": {
-        "type": "SliderInt",
-        "value": 20,
-        "min": 5,
-        "max": 80,
-        "step": 5,
-        "label": "Consumers",
-    },
-    "n_firms": {
-        "type": "SliderInt",
-        "value": 10,
-        "min": 3,
-        "max": 40,
-        "step": 1,
-        "label": "Firms",
-    },
-    "n_traders": {
-        "type": "SliderInt",
-        "value": 20,
-        "min": 5,
-        "max": 80,
-        "step": 5,
-        "label": "Traders",
-    },
-    "tax_rate": {
-        "type": "SliderFloat",
-        "value": 0.15,
-        "min": 0.0,
-        "max": 0.45,
-        "step": 0.01,
-        "label": "Income Tax Rate",
-        "format": "0%",
-    },
-    "base_interest_rate": {
-        "type": "SliderFloat",
-        "value": 0.05,
-        "min": 0.0,
-        "max": 0.25,
-        "step": 0.01,
-        "label": "Base Interest Rate",
-        "format": "0%",
-    },
-    "min_wage": {
-        "type": "SliderFloat",
-        "value": 7.0,
-        "min": 0.0,
-        "max": 20.0,
-        "step": 0.5,
-        "label": "Minimum Wage",
-    },
-    "productivity": {
-        "type": "SliderFloat",
-        "value": 1.0,
-        "min": 0.1,
-        "max": 3.0,
-        "step": 0.1,
-        "label": "Productivity",
-    },
-    "subsidy": {
-        "type": "SliderFloat",
-        "value": 0.0,
-        "min": 0.0,
-        "max": 20.0,
-        "step": 0.5,
-        "label": "Unemployment Subsidy",
-    },
+# 模型参数默认值
+_PARAM_DEFAULTS = {
+    "n_households":  {"min": 5,  "max": 80,  "step": 5,   "default": 20, "label": "Consumers",           "fmt": None},
+    "n_firms":       {"min": 3,  "max": 40,  "step": 1,   "default": 10, "label": "Firms",               "fmt": None},
+    "n_traders":     {"min": 5,  "max": 80,  "step": 5,   "default": 20, "label": "Traders",             "fmt": None},
+    "tax_rate":      {"min": 0.0,"max": 0.45,"step": 0.01,"default": 0.15,"label": "Income Tax Rate",    "fmt": "0%"},
+    "base_interest_rate": {"min": 0.0,"max": 0.25,"step": 0.01,"default": 0.05,"label": "Base Interest Rate","fmt": "0%"},
+    "min_wage":      {"min": 0.0,"max": 20.0, "step": 0.5, "default": 7.0,"label": "Minimum Wage",         "fmt": None},
+    "productivity":  {"min": 0.1,"max": 3.0,  "step": 0.1, "default": 1.0,"label": "Productivity",         "fmt": None},
+    "subsidy":       {"min": 0.0,"max": 20.0, "step": 0.5, "default": 0.0,"label": "Unemployment Subsidy", "fmt": None},
 }
 
 
 # ─────────────────────────────────────────────
-# Launch SolaraViz
+# 工具函数（逻辑复用 + 边界处理）
 # ─────────────────────────────────────────────
 
-model = EconomyModel()
+def get_agent_groups(model: Model) -> tuple[list[Firm], list[Household], list[Trader]]:
+    """从模型中分类获取所有主体"""
+    firms = [a for a in model.agents if isinstance(a, Firm)]
+    households = [a for a in model.agents if isinstance(a, Household)]
+    traders = [a for a in model.agents if isinstance(a, Trader)]
+    return firms, households, traders
 
+
+def build_macro_stats(model: Model) -> dict[str, Any]:
+    """
+    计算宏观统计数据，分离业务计算与可视化。
+    边界处理：households 为空时避免除零。
+    """
+    firms, households, traders = get_agent_groups(model)
+    n_hh = len(households)
+    employed = sum(1 for h in households if h.employed)
+    emp_rate = (employed / n_hh * 100) if n_hh > 0 else 0.0
+
+    return {
+        "cycle":         model.cycle,
+        "n_firms":       len(firms),
+        "employed":      employed,
+        "n_households":  n_hh,
+        "emp_rate":      f"{emp_rate:.0f}%",
+        "n_unemployed":  n_hh - employed if n_hh > 0 else 0,
+        "n_traders":     len(traders),
+        "total_prod":    sum(f.production for f in firms),
+        "total_div":     model.total_dividends,
+        "tax_rate":      f"{model.tax_rate:.0%}",
+        "interest_rate": f"{model.base_interest_rate:.0%}",
+        "price_index":   f"{model.price_index:.2f}",
+        "govt_rev":      f"{model.govt_revenue:.1f}",
+        "loans":         f"{model.total_loans_outstanding:.1f}",
+    }
+
+
+def build_model_params() -> dict[str, dict]:
+    """根据 _PARAM_DEFAULTS 构建 SolaraViz 参数字典"""
+    params = {}
+    for name, cfg in _PARAM_DEFAULTS.items():
+        is_int = isinstance(cfg["step"], int) or cfg["step"] == int(cfg["step"])
+        params[name] = {
+            "type":  "SliderInt" if is_int else "SliderFloat",
+            "value": cfg["default"],
+            "min":   cfg["min"],
+            "max":   cfg["max"],
+            "step":  cfg["step"],
+            "label": cfg["label"],
+        }
+        if cfg["fmt"]:
+            params[name]["format"] = cfg["fmt"]
+    return params
+
+
+def create_charts(names: tuple[str, ...]) -> list:
+    """
+    批量创建图表组件，消除重复代码。
+    创建失败时降级为占位组件，避免页面崩溃。
+    """
+    charts = []
+    for name in names:
+        try:
+            charts.append(make_plot_component(name, backend="matplotlib"))
+        except Exception as e:
+            logger.error("Chart '%s' creation failed: %s", name, e)
+            # 降级占位组件
+            @solara.component
+            def fallback(m: Model, n=name, err=str(e)):
+                solara.Text(f"Chart '{n}' unavailable — {err[:40]}")
+            charts.append(fallback)
+    return charts
+
+
+# ─────────────────────────────────────────────
+# Solara 组件
+# ─────────────────────────────────────────────
+
+@solara.component
+def MacroStats(model: Model):
+    """实时宏观统计面板"""
+    stats = build_macro_stats(model)
+
+    html = (
+        f"<div style='{STYLE_CONTAINER}'>"
+        f"  <div style='{STYLE_HEADER}'>Macro Snapshot — Cycle {stats['cycle']}</div>"
+        f"  <div style='{STYLE_GRID}'>"
+        f"    <div>Firms: {stats['n_firms']}</div>"
+        f"    <div>Employment: {stats['employed']}/{stats['n_households']} ({stats['emp_rate']})</div>"
+        f"    <div>Unemployed: {stats['n_unemployed']}</div>"
+        f"    <div>Traders: {stats['n_traders']}</div>"
+        f"    <div>Output: {stats['total_prod']:.1f}</div>"
+        f"    <div>Dividends: {stats['total_div']:.1f}</div>"
+        f"    <div>Tax Rate: {stats['tax_rate']}</div>"
+        f"    <div>Interest Rate: {stats['interest_rate']}</div>"
+        f"    <div>Price Index: {stats['price_index']}</div>"
+        f"    <div>Gov Revenue: {stats['govt_rev']}</div>"
+        f"    <div>Loans: {stats['loans']}</div>"
+        f"  </div>"
+        f"</div>"
+    )
+    solara.HTML(tag="div", unsafe_innerHTML=html)
+
+
+# ─────────────────────────────────────────────
+# 初始化
+# ─────────────────────────────────────────────
+
+logger.info("Building chart components...")
+chart_components = create_charts(CHART_NAMES)
+
+logger.info("Building model parameters...")
+model_params = build_model_params()
+
+logger.info("Initializing model...")
+try:
+    model = EconomyModel()
+except Exception as e:
+    logger.critical("Model initialization failed: %s", e)
+    raise
+
+logger.info("Starting SolaraViz on http://127.0.0.1:8521 ...")
 page = SolaraViz(
     model,
     renderer=None,
-    components=[
-        MacroStats,
-        chart_stock,
-        chart_gdp,
-        chart_unemp,
-        chart_price,
-        chart_gini,
-        chart_orders,
-        chart_loans,
-    ],
+    components=[MacroStats, *chart_components],
     model_params=model_params,
-    name="Economic Sandbox",
-    play_interval=200,
+    name=APP_NAME,
+    play_interval=PLAY_INTERVAL_MS,
 )
 
 page
