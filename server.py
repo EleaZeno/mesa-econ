@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 # 可视化配置
-PLAY_INTERVAL_MS = 200
+PLAY_INTERVAL_MS = 500  # 500ms 更稳定，避免计算卡顿
 APP_NAME = "Economic Sandbox"
 
 # 样式常量
@@ -89,7 +89,7 @@ def get_agent_groups(model: Model) -> tuple[list[Firm], list[Household], list[Tr
 def build_macro_stats(model: Model) -> dict[str, Any]:
     """
     计算宏观统计数据，分离业务计算与可视化。
-    边界处理：households 为空时避免除零。
+    边界处理：households 为空时避免除零，属性缺失时返回默认值。
     """
     firms, households, traders = get_agent_groups(model)
     n_hh = len(households)
@@ -97,20 +97,20 @@ def build_macro_stats(model: Model) -> dict[str, Any]:
     emp_rate = (employed / n_hh * 100) if n_hh > 0 else 0.0
 
     return {
-        "cycle":         model.cycle,
+        "cycle":         getattr(model, "cycle", 0),
         "n_firms":       len(firms),
         "employed":      employed,
         "n_households":  n_hh,
         "emp_rate":      f"{emp_rate:.0f}%",
         "n_unemployed":  n_hh - employed if n_hh > 0 else 0,
         "n_traders":     len(traders),
-        "total_prod":    sum(f.production for f in firms),
-        "total_div":     model.total_dividends,
-        "tax_rate":      f"{model.tax_rate:.0%}",
-        "interest_rate": f"{model.base_interest_rate:.0%}",
-        "price_index":   f"{model.price_index:.2f}",
-        "govt_rev":      f"{model.govt_revenue:.1f}",
-        "loans":         f"{model.total_loans_outstanding:.1f}",
+        "total_prod":    sum(getattr(f, "production", 0) for f in firms),
+        "total_div":     getattr(model, "total_dividends", 0.0),
+        "tax_rate":      f"{getattr(model, 'tax_rate', 0):.0%}",
+        "interest_rate": f"{getattr(model, 'base_interest_rate', 0):.0%}",
+        "price_index":   f"{getattr(model, 'price_index', 0):.2f}",
+        "govt_rev":      f"{getattr(model, 'govt_revenue', 0):.1f}",
+        "loans":         f"{getattr(model, 'total_loans_outstanding', 0):.1f}",
     }
 
 
