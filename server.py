@@ -117,6 +117,11 @@ def build_macro_stats(model: EconomyModel) -> dict[str, Any]:
         "interest_rate": model.base_interest_rate,
         "price_index":   model.price_index,
         "govt_rev":      model.govt_revenue,
+                "gov_purch":    model.gov_purchase,
+                "cap_gains":    model.capital_gains_tax_revenue,
+                "systemic":     round(model.systemic_risk, 3),
+                "bankrupt":     model.bankrupt_count,
+                "n_firms":      len(model.firms),
         "loans":         model.total_loans_outstanding,
         "volatility":    model.stock_volatility,
         "default_count": model.default_count,
@@ -261,6 +266,9 @@ def ParamSliders():
     min_wage = solara.use_reactive(7.0)
     productivity = solara.use_reactive(1.0)
     subsidy = solara.use_reactive(0.0)
+    gov_purchase = solara.use_reactive(0.0)
+    capital_gains_tax = solara.use_reactive(0.10)
+    shock_prob = solara.use_reactive(0.02)
 
     def apply_immediately(key: str, value: Any):
         """立即应用到当前运行的模型（不重置模拟）"""

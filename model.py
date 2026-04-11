@@ -1,129 +1,389 @@
 """
-Mesa 经济沙盘 - 核心模型 v2.0
-全面经济系统沙盒：消费者 × 企业 × 银行 × 交易者 × 政府
+Mesa 经济沙盘 - 核心模型 v3.0
+基于 FRB/US · NAWM · ABCE 框架设计思路
 
-经济逻辑：
-  - 商品市场：企业生产 → 居民消费（支出法GDP）
-  - 劳动力市场：企业招聘 → 居民就业/失业
-  - 信贷市场：银行贷款 ↔ 企业/居民借贷，违约同步记录
-  - 股票市场：交易者动量策略 + 居民参与
-  - 政府财政：税收收入 - 失业补贴支出
+v3.0 核心升级：
+  ┌─────────────────────────────────────────────────────────────┐
+  │ 一、智能体异质性                                            │
+  │   Household: 三层收入 / 风险偏好 / 技能等级 / 差异化MPC     │
+  │   Firm:     三行业 × 三生命周期阶段                        │
+  │   Bank:     差异化利率（风险偏好型 vs 保守型）              │
+  │   Trader:   四策略（动量 / 价值 / 噪声 / 做市商）           │
+  ├─────────────────────────────────────────────────────────────┤
+  │ 二、市场精细化                                              │
+  │   商品市场: 企业独立定价 + 伯特兰竞争 + 价格粘性            │
+  │   劳动力:   技能匹配 + 失业率议价 + 摩擦性失业             │
+  │   信贷:     信用评分 + 抵押品 + 违约传导链                  │
+  │   股市:     戈登增长模型基本面锚 + 供需短期扰动            │
+  ├─────────────────────────────────────────────────────────────┤
+  │ 三、政策传导                                                │
+  │   政府购买（GDP拉动）+ 资本利得税 + 量化宽松（QE）         │
+  │   利率→融资成本→招聘→失业率→消费 传导链                   │
+  ├─────────────────────────────────────────────────────────────┤
+  │ 四、外部冲击                                                │
+  │   外生冲击：石油危机 / 技术突破 / 需求骤降 / 贸易战       │
+  │   内生螺旋：金融加速器效应（抵押品→保证金→抛售）         │
+  └─────────────────────────────────────────────────────────────┘
 
 Mesa 3.x 最佳实践：
-  - 分阶段调度（Bank → Firm → Household → Trader）
+  - 分阶段调度（Shock → Bank → Firm → Household → Trader → Model宏观）
   - Agent 分类缓存（避免 O(n²) 重复筛选）
-  - 参数全部可配置（无魔法数字）
-  - 数据收集器含 Agent 类型标签
+  - 参数全部可配置（零魔法数字）
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from enum import Enum
+from typing import Optional
 
 import numpy as np
 from mesa import Agent, Model
 from mesa import DataCollector
 
-if TYPE_CHECKING:
-    from numpy.random import RandomGenerator
-
 logger = logging.getLogger("econ")
 
-# ─────────────────────────────────────────────
-# 全局默认值（所有魔法数字的唯一起源地）
-# ─────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════
+# 全局默认值（唯一配置源）
+# ══════════════════════════════════════════════════════════════
+
+class Industry(Enum):
+    """企业所属行业"""
+    MANUFACTURING = "manufacturing"   # 制造业：资本密集，边际成本高
+    SERVICE = "service"               # 服务业：轻资产，人力密集
+    TECH = "tech"                    # 科技：研发投入大，生产率波动高
+
+
+class FirmLifecycle(Enum):
+    """企业生命周期阶段"""
+    STARTUP = "startup"      # 初创：高风险，负现金流，强融资需求
+    GROWTH = "growth"       # 成长期：盈利扩张，高招聘需求
+    MATURE = "mature"       # 成熟期：稳定分红，低风险
+    DECLINE = "decline"     # 衰退：产能过剩，裁员/破产风险
+
+
+class TraderStrategy(Enum):
+    """交易员策略"""
+    MOMENTUM = "momentum"           # 动量：追涨杀跌
+    VALUE = "value"                 # 价值：基于内在价值低买高卖
+    NOISE = "noise"                 # 噪声：随机交易（散户行为）
+    MARKET_MAKER = "market_maker"   # 做市商：双向挂单，赚价差
+
+
+# ─── 居民异质性参数 ───────────────────────────────────────────
+
+# 三层收入分位：低(0-33%) / 中(33-67%) / 高(67-100%)
+INCOME_TIER_PARAMS = {
+    "low": dict(
+        mpc=0.80,        # 凯恩斯：低收入MPC≈0.8，赚100花80
+        risk_aversion=0.9,   # 高风险厌恶，偏好储蓄
+        stock_buy_prob=0.05,
+        stock_sell_prob=0.02,
+        initial_cash_range=(30, 100),
+        skill_weights={0: 0.7, 1: 0.25, 2: 0.05},  # 低收入：70%低技能
+    ),
+    "middle": dict(
+        mpc=0.50,        # 中等收入MPC≈0.5
+        risk_aversion=0.5,
+        stock_buy_prob=0.10,
+        stock_sell_prob=0.06,
+        initial_cash_range=(100, 250),
+        skill_weights={0: 0.3, 1: 0.50, 2: 0.20},
+    ),
+    "high": dict(
+        mpc=0.20,        # 高收入MPC≈0.2，赚100花20
+        risk_aversion=0.2,    # 低风险厌恶，愿意投资
+        stock_buy_prob=0.25,
+        stock_sell_prob=0.15,
+        initial_cash_range=(250, 600),
+        skill_weights={0: 0.05, 1: 0.35, 2: 0.60},  # 高收入：60%高技能
+    ),
+}
+
+# ─── 企业异质性参数 ───────────────────────────────────────────
+
+INDUSTRY_PARAMS = {
+    Industry.MANUFACTURING: dict(
+        capital_intensity=2.0,     # 资本密集度（影响边际成本）
+        price_flexibility=0.3,    # 价格调整速度（价格粘性：低→慢）
+        wage_premium=1.0,         # 工资溢价（相对基准）
+        productivity_noise=2.5,    # 生产率波动
+        div_ratio=0.03,           # 分红比例（低：留存利润扩产）
+        layoff_prob=0.05,         # 裁员概率（经济差时）
+    ),
+    Industry.SERVICE: dict(
+        capital_intensity=0.5,     # 轻资产
+        price_flexibility=0.5,     # 价格较灵活
+        wage_premium=0.9,
+        productivity_noise=1.5,
+        div_ratio=0.06,
+        layoff_prob=0.03,
+    ),
+    Industry.TECH: dict(
+        capital_intensity=0.3,    # 低资本，高研发
+        price_flexibility=0.7,    # 高灵活性
+        wage_premium=1.5,         # 科技人才溢价
+        productivity_noise=4.0,   # 高波动（技术突破/失败）
+        div_ratio=0.02,           # 科技股少分红（高增长留存）
+        layoff_prob=0.08,         # 快速裁员调整
+    ),
+}
+
+# 企业生命周期权重
+LIFECYCLE_WEIGHTS = {
+    FirmLifecycle.STARTUP: 0.15,
+    FirmLifecycle.GROWTH: 0.30,
+    FirmLifecycle.MATURE: 0.40,
+    FirmLifecycle.DECLINE: 0.15,
+}
+
+# ─── 银行异质性参数 ───────────────────────────────────────────
+
+BANK_PARAMS = {
+    "aggressive": dict(   # 风险偏好型银行
+        risk_appetite=0.8,
+        lending_spread=0.05,   # 高利差：基准+5%
+        default_tolerance=0.7, # 高容忍坏账
+        loan_amount=30.0,       # 大额放贷
+        initial_reserves=1200.0,
+    ),
+    "conservative": dict(  # 保守型银行
+        risk_appetite=0.3,
+        lending_spread=0.01,   # 低利差：基准+1%
+        default_tolerance=0.3,
+        loan_amount=15.0,
+        initial_reserves=800.0,
+    ),
+}
+
+# ─── 核心模型参数 ───────────────────────────────────────────
 
 DEFAULTS = dict(
-    n_households=20,
-    n_firms=10,
+    n_households=25,
+    n_firms=12,
     n_banks=2,
     n_traders=20,
-    # 政策参数
-    tax_rate=0.15,
-    base_interest_rate=0.05,
-    min_wage=7.0,
-    productivity=1.0,
-    subsidy=0.0,
-    # 行为参数
-    consume_prob=0.6,          # 居民消费概率
-    job_search_prob=0.3,       # 居民求职概率
-    stock_buy_prob=0.1,        # 居民买股概率
-    stock_sell_prob=0.08,      # 居民卖股概率
-    bank_loan_amount=20.0,     # 银行单次放贷额
-    bank_lending_spread=0.02,  # 银行贷款利差
-    deposit_rate=0.01,         # 银行存款利率
-    div_profit_ratio=0.05,     # 企业股息发放比例
-    loan_cap=500.0,           # 企业借贷上限
-    household_loan_cap=200.0, # 居民借贷上限
-    household_deposit_rate=0.2,  # 居民存款比例（预防银行储备耗尽）
-    # 生产参数
-    wage_base=2.0,             # 基础工资 = employees * wage_base
-    production_noise_std=2.0, # 生产随机波动
-    # 宏观锚点
-    gdp_target=1500.0,         # 物价稳定时的目标GDP
-    price_adjust_speed=0.1,    # 物价调整速度
-    stock_adjust_speed=0.03,   # 股价调整速度
-    vol_window=10,            # 波动率滚动窗口
-    # 风险参数
-    default_threshold=0.5,    # 违约概率阈值（超过则计入 default_count）
+    # ── 政策参数 ──────────────────────────────────────
+    tax_rate=0.15,             # 所得税率
+    capital_gains_tax=0.10,     # 资本利得税率
+    base_interest_rate=0.05,   # 基准利率
+    min_wage=7.0,               # 最低工资
+    productivity=1.0,           # 全要素生产率（TFP）
+    subsidy=0.0,                # 失业补贴
+    gov_purchase=0.0,          # 政府购买（新增）
+    qe_amount=0.0,              # 量化宽松规模（新增）
+    # ── 劳动力市场 ────────────────────────────────────
+    job_search_cost=1.0,        # 求职现金消耗（摩擦成本）
+    wage_bargain_strength=0.2, # 工资议价强度
+    skill_wage_premium_high=0.5,  # 高技能工资溢价（+50%）
+    skill_wage_premium_mid=0.2,   # 中技能溢价（+20%）
+    # ── 信贷市场 ──────────────────────────────────────
+    credit_score_min=300,
+    credit_score_max=850,
+    collateral_ratio=0.7,      # 抵押品折价率
+    default_loss_rate=0.6,     # 违约损失率（银行实际损失比例）
+    # ── 金融市场 ─────────────────────────────────────
+    gordon_growth=0.02,         # 永续增长率（股价锚）
+    price_stickiness=0.3,      # 价格粘性：30%企业每轮调价
+    vol_window=10,             # 波动率滚动窗口
+    # ── 外部冲击 ──────────────────────────────────────
+    shock_prob=0.02,            # 每轮外生冲击概率
+    # ── 宏观锚点 ──────────────────────────────────────
+    gdp_target=1800.0,
+    price_adjust_speed=0.08,
+    stock_adjust_speed=0.025,
+    # ── 风险参数 ──────────────────────────────────────
+    default_threshold=0.5,
+    bankruptcy_cycles=3,        # 连续N轮负现金流→破产
 )
 
 
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 # 工具函数
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 
 def _clamp(val: float, lo: float, hi: float) -> float:
-    """将 val 限制在 [lo, hi] 范围内"""
     return max(lo, min(hi, val))
 
 
 def _safe_div(a: float, b: float, default: float = 0.0) -> float:
-    """安全除法"""
     return a / b if b != 0 else default
 
 
-# ─────────────────────────────────────────────
+def _draw_income_tier(rng: np.random.Generator) -> str:
+    """帕累托加权抽取收入层（高收入抽取概率低，符合真实分布）"""
+    r = rng.random()
+    if r < 0.33:
+        return "low"
+    elif r < 0.67:
+        return "middle"
+    else:
+        return "high"
+
+
+def _draw_industry(rng: np.random.Generator) -> Industry:
+    r = rng.random()
+    if r < 0.40:
+        return Industry.MANUFACTURING
+    elif r < 0.75:
+        return Industry.SERVICE
+    else:
+        return Industry.TECH
+
+
+def _draw_lifecycle(rng: np.random.Generator) -> FirmLifecycle:
+    r = rng.random()
+    cum = 0.0
+    for stage, w in LIFECYCLE_WEIGHTS.items():
+        cum += w
+        if r < cum:
+            return stage
+    return FirmLifecycle.MATURE
+
+
+def _draw_trader_strategy(rng: np.random.Generator) -> TraderStrategy:
+    r = rng.random()
+    if r < 0.35:
+        return TraderStrategy.MOMENTUM
+    elif r < 0.55:
+        return TraderStrategy.VALUE
+    elif r < 0.80:
+        return TraderStrategy.NOISE
+    else:
+        return TraderStrategy.MARKET_MAKER
+
+
+# ══════════════════════════════════════════════════════════════
+# 外部冲击事件
+# ══════════════════════════════════════════════════════════════
+
+class Shock(Enum):
+    """外生冲击类型"""
+    OIL_CRISIS = "oil_crisis"
+    TECH_BREAKTHROUGH = "tech_breakthrough"
+    DEMAND_SLOWDOWN = "demand_slowdown"
+    TRADE_WAR = "trade_war"
+    BANKING_PANIC = "banking_panic"
+    RECOVERY = "recovery"
+
+
+SHOCK_EFFECTS = {
+    Shock.OIL_CRISIS: {
+        "desc": "石油危机：生产成本暴涨",
+        "productivity": lambda p: p * 0.70,
+        "stock_sentiment": -0.15,   # 股市情绪负面
+        "consumption_delta": -0.10, # 消费意愿下降
+    },
+    Shock.TECH_BREAKTHROUGH: {
+        "desc": "技术突破：TFP大幅提升",
+        "productivity": lambda p: p * 1.40,
+        "stock_sentiment": 0.20,
+        "consumption_delta": 0.05,
+    },
+    Shock.DEMAND_SLOWDOWN: {
+        "desc": "需求骤降（如疫情）",
+        "productivity": lambda p: p * 0.85,
+        "stock_sentiment": -0.20,
+        "consumption_delta": -0.30,
+    },
+    Shock.TRADE_WAR: {
+        "desc": "贸易战：出口中断",
+        "productivity": lambda p: p * 0.90,
+        "stock_sentiment": -0.10,
+        "consumption_delta": 0.02,  # 国内替代消费微增
+    },
+    Shock.BANKING_PANIC: {
+        "desc": "银行恐慌：储户挤兑",
+        "stock_sentiment": -0.25,
+        "consumption_delta": -0.05,
+        "bank_run": True,          # 触发银行挤兑
+    },
+    Shock.RECOVERY: {
+        "desc": "经济复苏：需求回暖",
+        "productivity": lambda p: p * 1.15,
+        "stock_sentiment": 0.15,
+        "consumption_delta": 0.15,
+    },
+}
+
+
+# ══════════════════════════════════════════════════════════════
 # 代理人
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 
 class Household(Agent):
     """
-    消费者行为：
-      get_wage()  → 领工资（扣税）
-      repay_loan() → 偿还贷款
-      deposit()    → 存款（补充银行储备）
-      consume()    → 消费商品
-      buy_stock()  → 买股票
-      sell_stock() → 卖股票
-      find_job()   → 找工作
-      update_wealth() → 更新财富（cash - 贷款 + 股票市值）
+    消费者 v3.0 - 异质性版本
+
+    核心异质性：
+      income_tier  → 决定 MPC、风险偏好、初始财富、技能分布
+      skill_level  → 决定就业匹配、高薪岗位机会
+      risk_aversion → 决定股票持有比例、借贷意愿
+      credit_score  → 决定银行贷款批准概率
+
+    行为顺序：
+      earn_wage() → pay_taxes() → repay_loan() → deposit()
+      → consume() → invest() → search_job()
     """
 
     def __init__(self, model: EconomyModel):
         super().__init__(model)
-        self.cash: float = self.random.uniform(50, 200)
+
+        # ── 异质性属性 ───────────────────────────────
+        self.income_tier = _draw_income_tier(self.random)
+        p = INCOME_TIER_PARAMS[self.income_tier]
+        self.mpc = p["mpc"]                          # 边际消费倾向
+        self.risk_aversion = p["risk_aversion"]      # 风险厌恶系数
+        self.consume_prob = min(0.95, p["mpc"])      # 消费概率≈MPC
+        self.stock_buy_prob = p["stock_buy_prob"]
+        self.stock_sell_prob = p["stock_sell_prob"]
+
+        # 技能等级：0=低技能 / 1=中技能 / 2=高技能
+        skill = self.random.choices(
+            [0, 1, 2], weights=list(p["skill_weights"].values()), k=1
+        )[0]
+        self.skill_level = skill  # 0=低 / 1=中 / 2=高
+
+        # 初始现金（帕累托分布偏向低现金）
+        lo, hi = p["initial_cash_range"]
+        self.cash = self.random.uniform(lo, hi)
+
+        # ── 状态变量 ───────────────────────────────
         self.goods: int = 0
         self.salary: float = 0.0
         self.employed: bool = False
-        self.wealth: float = self.cash
+        self.employer: Optional["Firm"] = None
         self.loan_principal: float = 0.0
         self.shares_owned: int = 0
+        self.wealth: float = self.cash
+        # 信用评分：初始基于技能水平（高技能→高信用）
+        self.credit_score: float = 500 + self.skill_level * 100
+        # 历史收入（用于信用评估）
+        self.income_history: list[float] = []
 
-    # ── 子行为 ──────────────────────────────────
+    # ── 子行为 ─────────────────────────────────────────────
 
-    def get_wage(self) -> None:
-        """领取工资，扣除所得税"""
+    def earn_wage(self) -> None:
+        """领取工资（含个税）"""
         if not self.employed or self.salary <= 0:
             return
         wage = self.salary
-        tax = wage * self.model.tax_rate
-        self.cash += wage - tax
+        self.cash += wage
+        self.income_history.append(wage)
+        if len(self.income_history) > 12:
+            self.income_history.pop(0)
+
+    def pay_taxes(self) -> None:
+        """缴纳个人所得税"""
+        if self.salary <= 0:
+            return
+        tax = self.salary * self.model.tax_rate
+        self.cash -= tax
         self.model.govt_revenue += tax
 
     def repay_loan(self) -> None:
-        """偿还贷款本金+利息"""
+        """定期偿还贷款（含利息）"""
         if self.loan_principal <= 0:
             return
         rate = self.model.base_interest_rate
@@ -131,180 +391,367 @@ class Household(Agent):
         repayment = min(self.model.min_wage * 0.1, self.loan_principal + interest)
         if self.cash >= repayment:
             self.cash -= repayment
-            # 利息交给银行（模拟信贷市场摩擦）
             self.loan_principal = max(0.0, self.loan_principal - max(0.0, repayment - interest))
 
     def deposit(self) -> None:
-        """存款：将部分现金存入银行（补充银行储备，防止储备耗尽）"""
+        """存款：MPC越高→存款比例越低（高收入存更多）"""
         if self.cash <= 5:
             return
-        deposit_amount = self.cash * self.model.deposit_rate
-        if deposit_amount > 1 and self.model.banks:
-            self.cash -= deposit_amount
+        # 高MPC（低收入）几乎不存款；低MPC（高收入）存款更多
+        deposit_rate = (1 - self.mpc) * 0.3
+        deposit = self.cash * deposit_rate
+        if deposit > 1 and self.model.banks:
+            self.cash -= deposit
             bank = self.random.choice(self.model.banks)
-            bank.reserves += deposit_amount
-            bank.deposits += deposit_amount
+            bank.reserves += deposit
+            bank.deposits += deposit
 
     def consume(self) -> None:
-        """用现金购买商品（受概率控制）"""
-        if self.cash <= self.model.price_index:
+        """
+        差异化消费：按MPC决定是否消费
+        高MPC（低收入）：几乎必定消费（生存型）
+        低MPC（高收入）：消费概率低（储蓄/投资型）
+        """
+        price = self.model.avg_price
+        if self.cash < price:
             return
-        if self.random.random() < self.model.consume_prob:
-            self.cash -= self.model.price_index
+        # 消费概率与MPC挂钩，略有噪声
+        consume_prob = min(0.98, self.mpc + self.random.uniform(-0.05, 0.05))
+        if self.random.random() < consume_prob:
+            self.cash -= price
             self.goods += 1
 
-    def buy_stock(self) -> None:
-        """持有现金时以一定概率买入股票"""
-        if self.cash <= self.model.stock_price:
+    def invest(self) -> None:
+        """股票投资：风险厌恶决定是否参与股市"""
+        price = self.model.stock_price
+        # 风险厌恶高→几乎不参与
+        if self.random.random() > (1 - self.risk_aversion) * 0.5 + 0.1:
             return
-        if self.random.random() < self.model.stock_buy_prob:
-            self.cash -= self.model.stock_price
-            self.shares_owned += 1
-            self.model.buy_orders += 1
-
-    def sell_stock(self) -> None:
-        """持有股票时以一定概率卖出（保留 20% 仓位）"""
-        if self.shares_owned <= 1:
-            return
-        if self.random.random() < self.model.stock_sell_prob:
-            self.cash += self.model.stock_price * 0.95
+        # 买入
+        if self.cash >= price * 2 and self.random.random() < self.stock_buy_prob:
+            self.cash -= price * 2
+            self.shares_owned += 2
+            self.model.buy_orders += 2
+        # 卖出（保留部分仓位）
+        elif self.shares_owned > 1 and self.random.random() < self.stock_sell_prob:
+            self.cash += price * 0.95
             self.model.sell_orders += 1
             self.shares_owned -= 1
 
-    def find_job(self) -> None:
-        """失业时随机求职"""
+    def search_job(self) -> None:
+        """找工作（摩擦性失业：消耗现金）"""
         if self.employed:
             return
-        if self.model.firms and self.random.random() < self.model.job_search_prob:
-            firm = self.random.choice(self.model.firms)
-            if firm.open_positions > 0:
+        # 求职现金消耗（摩擦成本）
+        if self.cash > DEFAULTS["job_search_cost"]:
+            self.cash -= DEFAULTS["job_search_cost"]
+
+        if self.model.firms and self.random.random() < 0.35:
+            # 按技能等级匹配岗位
+            candidates = [
+                f for f in self.model.firms
+                if f.open_positions > 0
+                and f.wage_offer >= self.model.min_wage
+            ]
+            if candidates:
+                firm = self.random.choice(candidates)
                 firm.open_positions -= 1
                 self.employed = True
-                self.salary = firm.wage_offer
+                self.employer = firm
+                # 工资议价：失业率越高，议价能力越弱
+                ur = self.model.unemployment
+                wpremium = DEFAULTS["skill_wage_premium_mid"] if self.skill_level == 1 \
+                    else DEFAULTS["skill_wage_premium_high"] if self.skill_level == 2 else 0.0
+                wage = firm.wage_offer * (1 - ur * DEFAULTS["wage_bargain_strength"]) * (1 + wpremium)
+                self.salary = max(self.model.min_wage, wage)
 
     def update_wealth(self) -> None:
-        """
-        财富 = 现金 - 负债 + 股票市值
-        贷款是负债，从财富中扣除（正确逻辑）
-        """
+        """财富 = 现金 - 负债 + 股票市值"""
         stock_value = self.shares_owned * self.model.stock_price
         self.wealth = self.cash - self.loan_principal + stock_value
 
-    # ── 主循环 ──────────────────────────────────
+    def update_credit_score(self) -> None:
+        """
+        信用评分更新：
+          - 收入稳定性（标准差越小越好）
+          - 当前负债比
+          - 历史记录长度
+        """
+        if len(self.income_history) < 2:
+            return
+        income_mean = np.mean(self.income_history)
+        income_std = np.std(self.income_history)
+        coeff_var = _safe_div(income_std, income_mean + 1e-6, 1.0)
+        stability = _clamp(1.0 - coeff_var, 0.0, 1.0)
+        debt_ratio = _safe_div(self.loan_principal, self.wealth + 1e-6, 0.0)
+        debt_penalty = _clamp(1.0 - debt_ratio * 0.5, 0.5, 1.0)
+        # 信用评分 = 基准500 + 稳定性权重(±200) × 稳定性 + 负债调整
+        delta = (stability - 0.5) * 200 * debt_penalty
+        self.credit_score = _clamp(self.credit_score + delta * 0.1, DEFAULTS["credit_score_min"], DEFAULTS["credit_score_max"])
+
+    # ── 主循环 ─────────────────────────────────────────────
 
     def step(self) -> None:
-        self.get_wage()
+        self.earn_wage()
+        self.pay_taxes()
         self.repay_loan()
         self.deposit()
         self.consume()
-        self.buy_stock()
-        self.sell_stock()
-        self.find_job()
+        self.invest()
+        self.search_job()
+        self.update_credit_score()
         self.update_wealth()
 
 
 class Firm(Agent):
     """
-    企业行为：
-      hire()       → 招聘（开放岗位→匹配失业居民）
-      produce()    → 生产（规模报酬递减：sqrt(employees)）
-      sell_goods() → 向居民销售商品
-      pay_dividend() → 发放股息
-      update_wage() → 动态调整工资
-      repay_loan() → 偿还贷款（含违约判定）
-      update_wealth() → 更新财富
+    企业 v3.0 - 行业异质性 + 生命周期
+
+    核心异质性：
+      industry        → 差异化生产函数、定价策略、裁员率
+      lifecycle       → 决定分红率、招聘强度、破产风险
+
+    每个企业有独立定价权（price_stickiness 控制调价频率）
     """
 
     def __init__(self, model: EconomyModel):
         super().__init__(model)
-        self.cash: float = self.random.uniform(200, 800)
+
+        # ── 异质性 ─────────────────────────────────
+        self.industry = _draw_industry(self.random)
+        self.lifecycle = _draw_lifecycle(self.random)
+        ip = INDUSTRY_PARAMS[self.industry]
+
+        # 初始现金受生命周期影响
+        cash_lo, cash_hi = {
+            FirmLifecycle.STARTUP: (50, 200),
+            FirmLifecycle.GROWTH: (200, 500),
+            FirmLifecycle.MATURE: (400, 900),
+            FirmLifecycle.DECLINE: (100, 400),
+        }[self.lifecycle]
+        self.cash = self.random.uniform(cash_lo, cash_hi)
+
         self.employees: int = 0
-        self.wage_offer: float = max(model.min_wage, 8.0)
-        self.open_positions: int = self.random.randint(0, 3)
+        self.wage_offer: float = max(model.min_wage, 8.0) * ip["wage_premium"]
+        self.open_positions: int = self.random.randint(0, 4)
         self.production: float = 0.0
         self.inventory: float = 0.0
         self.loan_principal: float = 0.0
         self.wealth: float = self.cash
         self.dividend_per_share: float = 0.0
         self.default_probability: float = 0.0
-        self.wage_base: float = DEFAULTS["wage_base"]
+        self.price: float = model.avg_price if model.avg_price > 1 else 10.0
 
-    # ── 子行为 ──────────────────────────────────
+        # 生命周期专属参数
+        self.negative_cash_cycles: int = 0  # 连续负现金流轮次
+        self.rnd_investment: float = 0.0    # 研发投入（科技业）
+        self.capital_stock: float = 200.0   # 固定资产（制造业）
+
+        # 价格粘性：上次调价距今轮次
+        self.price_change_cooldown: int = 0
+
+        # 行业参数缓存
+        self._ind = ip
+
+    # ── 子行为 ─────────────────────────────────────────────
 
     def hire(self) -> None:
-        """从失业居民池中招聘"""
+        """招聘（受生命周期驱动：初创/衰退企业风格不同）"""
         if self.open_positions <= 0:
             return
         unemployed = self.model.unemployed_households
-        n_hire = min(self.open_positions, len(unemployed))
+        # 高技能岗位优先匹配高技能工人
+        skill_required = 1 if self.industry == Industry.TECH else 0
+        candidates = [h for h in unemployed if h.skill_level >= skill_required]
+        if not candidates:
+            candidates = unemployed[:]
+
+        n_hire = min(self.open_positions, len(candidates))
         for _ in range(n_hire):
-            if unemployed:
-                h = self.random.choice(unemployed)
+            if candidates:
+                h = self.random.choice(candidates)
                 h.employed = True
+                h.employer = self
                 h.salary = self.wage_offer
                 self.employees += 1
-                unemployed.remove(h)
-        self.open_positions = 0
+                self.open_positions -= 1
+                candidates.remove(h)
 
     def produce(self) -> None:
         """
-        规模报酬递减生产函数：
-          output = sqrt(employees) * wage_base * productivity + noise
-        符合经济学"边际产出递减"规律
+        差异化生产函数：
+
+        制造业：capital_intensity 高，依赖固定资产
+          production = sqrt(capital) × TFP × (employees^0.6)
+
+        服务业：轻资产，人力驱动
+          production = employees × wage_base × TFP
+
+        科技：R&D 驱动，高波动
+          production = employees × TFP × (1 + rnd_investment/cash)
         """
-        efficiency = self.model.productivity
-        self.production = (
-            np.sqrt(max(0, self.employees)) * self.wage_base * efficiency
-            + self.random.gauss(0, DEFAULTS["production_noise_std"])
-        )
+        T = self.model.productivity
+        noise_std = self._ind["productivity_noise"]
+
+        if self.industry == Industry.MANUFACTURING:
+            self.production = (
+                np.sqrt(max(1.0, self.capital_stock))
+                * T
+                * (max(1, self.employees) ** 0.6)
+                + self.random.gauss(0, noise_std)
+            )
+            # 资本折旧
+            self.capital_stock *= 0.98
+
+        elif self.industry == Industry.SERVICE:
+            self.production = (
+                max(1, self.employees)
+                * self.model.min_wage
+                * T
+                + self.random.gauss(0, noise_std)
+            )
+
+        elif self.industry == Industry.TECH:
+            # 科技业：研发投入转化为生产力（随机成功/失败）
+            rnd_success = self.random.gauss(1.0, 0.5)
+            rnd_success = max(0.1, rnd_success)
+            self.production = (
+                max(1, self.employees)
+                * T
+                * (1 + self.rnd_investment / max(1, self.cash) * rnd_success)
+                + self.random.gauss(0, noise_std)
+            )
+            # 研发投入（利润的固定比例）
+            self.rnd_investment = max(0.0, self.cash * 0.05 * rnd_success)
+
         self.production = max(0.0, self.production)
         self.inventory += self.production
 
+    def price_goods(self) -> None:
+        """
+        差异化定价 + 价格粘性：
+
+        1. 计算目标价格（基于边际成本 + 目标毛利率）
+        2. 价格粘性：仅 price_stickiness 比例的企业会调价
+        3. 伯特兰竞争：参考竞争对手平均价格
+        """
+        if self.price_change_cooldown > 0:
+            self.price_change_cooldown -= 1
+            return
+
+        # 价格粘性：仅部分企业每轮调价
+        if self.random.random() > DEFAULTS["price_stickiness"]:
+            return
+
+        competitors = [f for f in self.model.firms if f is not self and f.industry == self.industry]
+        avg_competitor_price = np.mean([f.price for f in competitors]) if competitors else self.model.avg_price
+
+        # 目标价格：库存多→降价去库存；库存少→涨价
+        cost_per_unit = self._ind["capital_intensity"] * self.model.min_wage * 0.5
+        if self.inventory > 15:
+            # 去库存：价格下浮最多20%
+            self.price = max(cost_per_unit, avg_competitor_price * 0.90)
+        elif self.inventory < 3:
+            # 供不应求：价格上浮最多15%
+            self.price = avg_competitor_price * 1.10
+        else:
+            # 正常：向竞争对手均价靠拢
+            self.price = 0.5 * self.price + 0.5 * avg_competitor_price
+
+        self.price = max(1.0, self.price)
+        # 调价后进入冷却期（模拟菜单成本）
+        self.price_change_cooldown = self.random.randint(1, 3)
+
     def sell_goods(self) -> None:
-        """向居民销售商品"""
+        """向居民销售商品（按价格排序：低价优先被购买）"""
         if self.inventory <= 0:
             return
+        # 价格敏感型消费：优先买便宜的
+        firms_sorted = sorted(self.model.firms, key=lambda f: f.price)
         buyers = self.random.sample(
-            self.model.households, min(len(self.model.households), 5)
+            self.model.households, min(len(self.model.households), 6)
         )
         for h in buyers:
-            if (
-                h.cash >= self.model.price_index
-                and h.goods < 10
-                and self.inventory > 0
-            ):
-                h.cash -= self.model.price_index
+            if h.cash >= self.price and h.goods < 10 and self.inventory > 0:
+                h.cash -= self.price
                 h.goods += 1
-                after_tax = self.model.price_index * (1 - self.model.tax_rate)
+                after_tax = self.price * (1 - self.model.tax_rate)
                 self.cash += after_tax
                 self.inventory -= 1
 
     def pay_dividend(self) -> None:
-        """利润中提取固定比例作为股息"""
-        if self.cash <= 100:
+        """生命周期决定分红率：成熟期高分红，初创期不分"""
+        if self.cash <= 50:
             return
-        profit = self.cash * DEFAULTS["div_profit_ratio"]
+        div_ratio = self._ind["div_ratio"]
+        if self.lifecycle == FirmLifecycle.STARTUP:
+            div_ratio *= 0.0   # 初创：不分红，留存扩产
+        elif self.lifecycle == FirmLifecycle.DECLINE:
+            div_ratio *= 1.5   # 衰退：变现资产
+
+        profit = self.cash * div_ratio
         self.cash -= profit
         self.dividend_per_share = _safe_div(profit, 50)
         self.model.total_dividends += profit
 
     def update_wage(self) -> None:
-        """根据库存动态调整工资（经济周期自动调节）"""
-        if self.inventory > 10:
-            self.wage_offer = _clamp(
-                self.wage_offer * 1.05,
-                self.model.min_wage,
-                self.model.min_wage * 10,
-            )
-        elif self.employees == 0 and self.inventory < 3:
-            self.wage_offer = _clamp(
-                self.wage_offer * 0.95,
-                self.model.min_wage,
-                self.model.min_wage * 10,
-            )
+        """行业 + 生命周期决定工资调整策略"""
+        ur = self.model.unemployment
+        # 失业率高→压低工资（劳动市场宽松）；失业率低→提高工资（抢人）
+        if ur > 0.15:
+            self.wage_offer = _clamp(self.wage_offer * 0.97, self.model.min_wage, 50.0)
+        elif self.inventory > 20 and self.lifecycle in (FirmLifecycle.GROWTH, FirmLifecycle.MATURE):
+            self.wage_offer = _clamp(self.wage_offer * 1.04, self.model.min_wage, 50.0)
+
+    def adjust_workforce(self) -> None:
+        """生命周期 + 经济状态决定裁员/扩产"""
+        if self.employees == 0:
+            return
+        # 衰退期或库存严重过剩时裁员
+        layoff_prob = self._ind["layoff_prob"]
+        if self.lifecycle == FirmLifecycle.DECLINE:
+            layoff_prob *= 2.0
+        if self.inventory < 2:
+            layoff_prob *= 3.0
+
+        if self.random.random() < layoff_prob:
+            n_layoff = min(self.employees, self.random.randint(1, 3))
+            # 随机裁一名员工
+            employed = [h for h in self.model.households if h.employer is self]
+            if employed:
+                h = self.random.choice(employed)
+                h.employed = False
+                h.employer = None
+                h.salary = 0.0
+                self.employees -= n_layoff
+
+    def apply_for_loan(self) -> None:
+        """申请贷款（有信用审核）"""
+        if self.loan_principal >= DEFAULTS.get("loan_cap", 500.0):
+            return
+        wage_bill = self.employees * self.wage_offer
+        if self.cash >= wage_bill * 0.5:
+            return
+
+        # 信用评分决定是否批准
+        cs = getattr(self, "credit_score", 600)
+        if cs < 400:
+            return  # 信用太差，拒绝
+
+        loan = min(DEFAULTS.get("bank_loan_amount", 20.0), DEFAULTS.get("loan_cap", 500.0) - self.loan_principal)
+        if loan <= 0:
+            return
+
+        self.cash += loan
+        self.loan_principal += loan
+        self.model.total_loans_outstanding += loan
+        if self.model.banks:
+            bank = self.random.choice(self.model.banks)
+            bank.total_loans += loan
+            bank.reserves -= loan
 
     def repay_loan(self) -> None:
-        """偿还贷款，若无力偿还则判定违约（同步通知银行）"""
+        """偿还贷款 + 违约判定"""
         if self.loan_principal <= 0:
             return
         rate = self.model.base_interest_rate
@@ -318,63 +765,95 @@ class Firm(Agent):
             self._trigger_default()
 
     def _trigger_default(self) -> None:
-        """触发违约：通知银行同步坏账，更新全局贷款余额"""
+        """违约触发：同步通知银行，增加全系统风险"""
         logger.warning(
-            "企业%d违约！现金%.1f，负债%.1f，违约概率%.2f",
-            self.unique_id, self.cash, self.loan_principal, self.default_probability,
+            "企业%d违约！行业=%s，周期=%d，现金=%.1f，负债=%.1f",
+            self.unique_id, self.industry.value, self.negative_cash_cycles,
+            self.cash, self.loan_principal,
         )
         if self.model.banks:
             bank = self.random.choice(self.model.banks)
+            # 违约损失率（银行实际承受）
+            actual_loss = self.loan_principal * DEFAULTS["default_loss_rate"]
             bank.total_loans -= self.loan_principal
-            bank.bad_debts += self.loan_principal
+            bank.bad_debts += actual_loss
         self.model.total_loans_outstanding -= self.loan_principal
         self.model.default_count += 1
+        self.model.systemic_risk = min(1.0, self.model.systemic_risk + 0.05)
         self.loan_principal = 0.0
 
-    def apply_for_loan(self) -> None:
-        """现金不足以发工资时向银行申请贷款"""
-        wage_bill = self.employees * self.wage_offer
-        if self.cash >= wage_bill * 0.5:
-            return
-        if self.loan_principal >= DEFAULTS["loan_cap"]:
-            return
-        loan = min(DEFAULTS["bank_loan_amount"], DEFAULTS["loan_cap"] - self.loan_principal)
-        if loan <= 0:
-            return
-        self.cash += loan
-        self.loan_principal += loan
-        self.model.total_loans_outstanding += loan
-        if self.model.banks:
-            bank = self.random.choice(self.model.banks)
-            bank.total_loans += loan
-            bank.reserves -= loan
-        logger.debug(
-            "企业%d贷款%.1f（累计负债%.1f，现金%.1f）",
-            self.unique_id, loan, self.loan_principal, self.cash,
-        )
+    def check_bankruptcy(self) -> bool:
+        """
+        破产判定：连续N轮现金流为负
+        触发：模型从 agents 列表移除
+        """
+        if self.cash < 0:
+            self.negative_cash_cycles += 1
+        else:
+            self.negative_cash_cycles = 0
+
+        if self.negative_cash_cycles >= DEFAULTS["bankruptcy_cycles"]:
+            logger.warning(
+                "企业%d破产！行业=%s，生命周期=%s",
+                self.unique_id, self.industry.value, self.lifecycle.value,
+            )
+            # 通知银行：企业消失，贷款清零
+            if self.loan_principal > 0:
+                self.model.total_loans_outstanding -= self.loan_principal
+                if self.model.banks:
+                    bank = self.random.choice(self.model.banks)
+                    bank.total_loans -= self.loan_principal
+                    bank.bad_debts += self.loan_principal * 0.8  # 破产损失率80%
+
+            # 解雇员工
+            for h in self.model.households:
+                if h.employer is self:
+                    h.employed = False
+                    h.employer = None
+                    h.salary = 0.0
+
+            self.model.firms.remove(self)
+            self.model.agents.remove(self)
+            self.model.bankrupt_count += 1
+            return True
+        return False
 
     def update_default_probability(self) -> None:
-        """违约概率 = 1 - 现金/负债比（上限1.0）"""
+        """违约概率 = 1 - 现金/负债（更敏感）"""
         total_debt = self.loan_principal + 1e-6
         self.default_probability = _clamp(1.0 - self.cash / total_debt, 0.0, 1.0)
 
-    def update_wealth(self) -> None:
-        """
-        企业财富 = 现金 - 负债 + 库存价值
-        库存按当期物价指数定价
-        """
-        inventory_value = self.inventory * self.model.price_index
-        self.wealth = self.cash - self.loan_principal + inventory_value
+    def update_credit_score(self) -> None:
+        """企业信用评分：基于利润率 + 负债率"""
+        profit_ratio = _safe_div(self.production, self.employees * self.wage_offer + 1.0, 1.0)
+        debt_ratio = _safe_div(self.loan_principal, self.wealth + 1.0, 0.0)
+        # 信用 = 基准600 + 盈利调整 - 负债惩罚
+        delta = (profit_ratio - 1.0) * 50 - debt_ratio * 100
+        self.credit_score = _clamp(
+            getattr(self, "credit_score", 600) + delta * 0.1,
+            DEFAULTS["credit_score_min"],
+            DEFAULTS["credit_score_max"],
+        )
 
-    # ── 主循环 ──────────────────────────────────
+    def update_wealth(self) -> None:
+        """企业财富 = 现金 - 负债 + 库存价值 + 固定资产"""
+        inventory_value = self.inventory * self.price
+        self.wealth = self.cash - self.loan_principal + inventory_value + self.capital_stock * 0.5
+
+    # ── 主循环 ─────────────────────────────────────────────
 
     def step(self) -> None:
+        if self.check_bankruptcy():
+            return  # 已破产，不再执行
         self.hire()
         self.produce()
+        self.price_goods()
         self.sell_goods()
         self.pay_dividend()
         self.update_wage()
+        self.adjust_workforce()
         self.update_default_probability()
+        self.update_credit_score()
         self.apply_for_loan()
         self.repay_loan()
         self.update_wealth()
@@ -382,64 +861,115 @@ class Firm(Agent):
 
 class Bank(Agent):
     """
-    银行行为：
-      pay_deposit_interest() → 向存款人支付利息（储备减少）
-      lend()                  → 向居民和企业放贷
-      update_bad_debts()      → 按企业违约概率估算坏账
-      update_wealth()         → 财富 = 准备金 + 有效贷款（扣除坏账）
+    银行 v3.0 - 差异化利率 + 巴塞尔合规
+
+    核心异质性：
+      risk_appetite    → 高则放贷激进、利率高；低则保守、利率低
+      lending_spread   → 在基准利率上的加点
+      default_tolerance → 坏账容忍度
     """
 
     def __init__(self, model: EconomyModel):
         super().__init__(model)
-        self.reserves: float = 1000.0
+
+        # ── 随机选择银行类型 ─────────────────────────
+        bank_type = "aggressive" if self.random.random() < 0.5 else "conservative"
+        bp = BANK_PARAMS[bank_type]
+        self.bank_type = bank_type
+        self.risk_appetite = bp["risk_appetite"]
+        self.lending_spread = bp["lending_spread"]
+        self.default_tolerance = bp["default_tolerance"]
+        self.loan_amount = bp["loan_amount"]
+        self.reserves: float = bp["initial_reserves"]
         self.deposits: float = 0.0
         self.total_loans: float = 0.0
         self.bad_debts: float = 0.0
         self.wealth: float = self.reserves
+        # 资本金（用于巴塞尔协议）
+        self.capital: float = bp["initial_reserves"] * 0.1
+
+    def _effective_rate(self, borrower: Agent) -> float:
+        """
+        差异化利率 = 基准利率 + 信用利差 + 银行风险偏好
+        信用评分低 → 利率高（风险溢价）
+        银行保守型 → 利差高
+        """
+        base = self.model.base_interest_rate
+        credit_score = getattr(borrower, "credit_score", 600)
+        # 信用评分映射到利差：[850分→+0%，300分→+5%]
+        score_penalty = (DEFAULTS["credit_score_max"] - credit_score) / (DEFAULTS["credit_score_max"] - DEFAULTS["credit_score_min"]) * 0.05
+        return base + self.lending_spread + score_penalty
 
     def pay_deposit_interest(self) -> None:
-        """支付存款利息（从储备中扣减）"""
-        interest = self.deposits * DEFAULTS["deposit_rate"]
+        """支付存款利息（从储备中扣除）"""
+        rate = self.model.base_interest_rate * 0.5  # 存款利率通常低于基准
+        interest = self.deposits * rate
         self.reserves -= interest
 
     def lend(self) -> None:
-        """向居民和企业放贷"""
+        """
+        差异化放贷：
+          - 按信用评分筛选
+          - 按风险偏好决定规模
+          - 资本金充足率合规检查（巴塞尔协议）
+        """
         if self.reserves <= 50:
             return
-        loan_amt = DEFAULTS["bank_loan_amount"]
-        # 混合抽取借款者
-        borrowers = self.model.households + self.model.firms
-        for _ in range(min(3, len(borrowers))):
-            if self.reserves <= loan_amt:
+
+        # 资本金充足率检查（风险加权资产 = 贷款额 × 1.0）
+        capital_ratio = self.capital / max(1.0, self.total_loans)
+        if capital_ratio < 0.08:
+            # 低于8%：强制收缩（巴塞尔III）
+            shrink = self.loan_amount * 0.3
+            self.reserves += shrink
+            self.total_loans -= shrink
+            return
+
+        borrowers = list(self.model.households) + list(self.model.firms)
+        max_loans = min(3, len(borrowers))
+
+        for _ in range(max_loans):
+            if self.reserves <= self.loan_amount:
                 break
             b = self.random.choice(borrowers)
             existing = getattr(b, "loan_principal", 0.0)
-            cap = DEFAULTS["household_loan_cap"] if isinstance(b, Household) else DEFAULTS["loan_cap"]
+            cap = DEFAULTS.get("household_loan_cap", 200.0) if isinstance(b, Household) \
+                else DEFAULTS.get("loan_cap", 500.0)
             if existing >= cap:
                 continue
-            b.cash += loan_amt
-            b.loan_principal = existing + loan_amt
-            self.reserves -= loan_amt
-            self.total_loans += loan_amt
-            self.model.total_loans_outstanding += loan_amt
+
+            # 信用审核
+            cs = getattr(b, "credit_score", 600)
+            if cs < 400:
+                continue  # 拒贷
+
+            amount = self.loan_amount * (0.7 + self.risk_appetite * 0.6)
+            amount = min(amount, cap - existing)
+            if amount <= 0:
+                continue
+
+            b.cash += amount
+            b.loan_principal = existing + amount
+            self.reserves -= amount
+            self.total_loans += amount
+            self.model.total_loans_outstanding += amount
 
     def update_bad_debts(self) -> None:
         """
-        坏账 = Σ(企业违约概率 × 该企业贷款额)
-        按期望值估算坏账（不是实际扣减，用于风险指标）
+        坏账 = Σ(企业违约概率 × 企业贷款额 × 损失率)
         """
         total = 0.0
         for f in self.model.firms:
             prob = getattr(f, "default_probability", 0.0)
             loan = getattr(f, "loan_principal", 0.0)
-            total += prob * loan
+            total += prob * loan * DEFAULTS["default_loss_rate"]
         self.bad_debts = total
 
+        # 更新资本金（利润留存）
+        self.capital = max(self.capital * 0.99, self.reserves * 0.1)
+
     def update_wealth(self) -> None:
-        """
-        银行财富 = 准备金 + 有效贷款（总贷款 - 坏账）
-        坏账全额扣除（比 50% 折价更合理）
-        """
+        """银行财富 = 准备金 + 有效贷款 - 坏账"""
         effective_loans = max(0.0, self.total_loans - self.bad_debts)
         self.wealth = self.reserves + effective_loans
 
@@ -452,56 +982,125 @@ class Bank(Agent):
 
 class Trader(Agent):
     """
-    交易者（动量策略）：
-      compute_momentum() → 计算动量指标
-      trade()            → 根据动量买入/卖出（含止损）
-      update_wealth()     → 财富 = 现金 + 持股 × 股价
+    交易员 v3.0 - 四种策略
+
+    动量（Momentum）：追涨杀跌
+    价值（Value）：基于戈登模型内在价值
+    噪声（Noise）：随机交易（散户行为）
+    做市商（Market Maker）：双向挂单赚价差
     """
 
     def __init__(self, model: EconomyModel):
         super().__init__(model)
+        self.strategy = _draw_trader_strategy(self.random)
         self.cash: float = self.random.uniform(300, 1000)
         self.shares: int = self.random.randint(0, 20)
         self.momentum: float = 0.0
+        # 价值投资者：持有对内在价值的估计
+        self.intrinsic_value_estimate: float = model.stock_price
+        # 做市商：买卖价差
+        self.bid_ask_spread: float = 0.02
         self.wealth: float = self.cash + self.shares * model.stock_price
 
-    def compute_momentum(self, price: float, prev_price: float) -> None:
-        """动量 = 0.7 × 旧动量 + 0.3 × 当期收益率"""
-        if prev_price <= 0:
+    def _update_momentum(self, price: float, prev: float) -> None:
+        if prev <= 0:
             return
-        ret = (price - prev_price) / prev_price
+        ret = (price - prev) / prev
         self.momentum = 0.7 * self.momentum + 0.3 * ret
 
-    def trade(self) -> None:
-        """动量策略交易：追涨杀跌，含止损"""
+    def _gordon_value(self, dividend: float, rate: float) -> float:
+        """戈登增长模型：P = D / (r - g)"""
+        g = DEFAULTS["gordon_growth"]
+        return _safe_div(dividend, rate - g, 100.0)
+
+    # ── 四种交易策略 ─────────────────────────────────────────
+
+    def _trade_momentum(self, price: float) -> None:
         m = self.model
-        price = m.stock_price
-        prev_price = m.prev_stock_price
-        self.compute_momentum(price, prev_price)
+        self._update_momentum(price, m.prev_stock_price)
 
-        buy_prob = _clamp(0.3 + self.momentum * 2, 0.0, 1.0)
-        sell_prob = _clamp(0.3 - self.momentum * 2, 0.0, 1.0)
+        buy_prob = _clamp(0.3 + self.momentum * 2.5, 0.0, 1.0)
+        sell_prob = _clamp(0.3 - self.momentum * 2.5, 0.0, 1.0)
 
-        # 买入（至少持有 2 股现金）
         if self.cash >= price * 2 and self.random.random() < buy_prob:
             self.cash -= price * 2
             self.shares += 2
             m.buy_orders += 2
 
-        # 止损（单日跌幅 > 5% 则清仓）
-        if prev_price > 0 and (prev_price - price) / prev_price > 0.05 and self.shares > 0:
+        # 止损
+        prev = m.prev_stock_price
+        if prev > 0 and (prev - price) / prev > 0.05 and self.shares > 0:
             m.sell_orders += self.shares
             self.cash += price * self.shares
             self.shares = 0
-
-        # 正常卖出
-        if self.shares > 0 and self.random.random() < sell_prob:
+        elif self.shares > 0 and self.random.random() < sell_prob:
             self.cash += price
             m.sell_orders += 1
             self.shares -= 1
 
+    def _trade_value(self, price: float) -> None:
+        """价值投资：内在价值低估则买，高估则卖"""
+        m = self.model
+        # 戈登模型估计内在价值
+        avg_div_per_share = m.total_dividends / max(1, len(m.firms) * 50)
+        intrinsic = self._gordon_value(avg_div_per_share, m.base_interest_rate)
+        # 平滑估计
+        self.intrinsic_value_estimate = 0.7 * self.intrinsic_value_estimate + 0.3 * intrinsic
+
+        # 折价20%以上 → 买入；溢价20%以上 → 卖出
+        if price < self.intrinsic_value_estimate * 0.80 and self.cash >= price:
+            self.cash -= price
+            self.shares += 1
+            m.buy_orders += 1
+        elif price > self.intrinsic_value_estimate * 1.20 and self.shares > 0:
+            self.cash += price
+            m.sell_orders += 1
+            self.shares -= 1
+
+    def _trade_noise(self, price: float) -> None:
+        """噪声交易：随机买卖（模拟散户非理性行为）"""
+        m = self.model
+        if self.cash >= price and self.random.random() < 0.2:
+            self.cash -= price
+            self.shares += 1
+            m.buy_orders += 1
+        if self.shares > 0 and self.random.random() < 0.18:
+            self.cash += price
+            m.sell_orders += 1
+            self.shares -= 1
+
+    def _trade_market_maker(self, price: float) -> None:
+        """做市商：双向挂单，赚取买卖价差"""
+        m = self.model
+        spread = self.bid_ask_spread
+        bid = price * (1 - spread)
+        ask = price * (1 + spread)
+
+        # 市价单：假设买卖均按当前价格成交
+        # 买入（当价格低于内在价值时）
+        if self.cash >= ask and self.random.random() < 0.4:
+            self.cash -= ask
+            self.shares += 1
+            m.buy_orders += 1
+        # 卖出
+        if self.shares > 0 and self.random.random() < 0.4:
+            self.cash += bid
+            m.sell_orders += 1
+            self.shares -= 1
+
+    def trade(self) -> None:
+        """根据策略类型执行交易"""
+        price = self.model.stock_price
+        if self.strategy == TraderStrategy.MOMENTUM:
+            self._trade_momentum(price)
+        elif self.strategy == TraderStrategy.VALUE:
+            self._trade_value(price)
+        elif self.strategy == TraderStrategy.NOISE:
+            self._trade_noise(price)
+        elif self.strategy == TraderStrategy.MARKET_MAKER:
+            self._trade_market_maker(price)
+
     def update_wealth(self) -> None:
-        """财富 = 现金 + 持股 × 股价"""
         self.wealth = self.cash + self.shares * self.model.stock_price
 
     def step(self) -> None:
@@ -509,173 +1108,180 @@ class Trader(Agent):
         self.update_wealth()
 
 
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 # 宏观指标
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 
 def compute_gini(model: EconomyModel) -> float:
-    """基尼系数（Allison 公式，对负财富友好）"""
-    wealths = [getattr(a, "wealth", 0.0) for a in model.agents
-               if isinstance(a, (Household, Firm, Trader))]
-    if len(wealths) < 2:
+    wealths = np.sort(np.array([getattr(a, "wealth", 0.0) for a in model.agents
+                                  if isinstance(a, (Household, Firm, Trader))], dtype=float))
+    n = len(wealths)
+    if n < 2:
         return 0.0
-    arr = np.sort(np.array(wealths, dtype=float))
-    n = len(arr)
-    cumsum = np.cumsum(arr)
-    mean = arr.mean()
+    mean = wealths.mean()
     if mean == 0:
         return 0.0
-    # Gini = (2 × Σ(i×w_i) / (n×Σw)) - (n+1)/n
-    return float((2 * np.sum(np.arange(1, n + 1) * arr)) / (n * cumsum[-1]) - (n + 1) / n)
+    return float((2 * np.sum(np.arange(1, n + 1) * wealths)) / (n * wealths.sum()) - (n + 1) / n)
 
 
 def compute_gdp(model: EconomyModel) -> float:
     """
-    支出法 GDP：
-      消费（C）= 居民购买企业商品的总支出
-      投资（I）= 企业本期生产 - 已销售部分（即库存增加）
-      政府购买（G）= 失业补贴总额
-    GDP = C + I + G
+    支出法 GDP（C + I + G）：
+      C = 居民消费（购买企业商品总支出）
+      I = 企业投资（生产 - 已售 + 研发 + 资本形成）
+      G = 政府购买 + 失业补贴
     """
-    firms = model.firms
     households = model.households
+    firms = model.firms
 
-    # 消费：居民本期消费支出 = 消费数量 × 物价
-    consumption = sum(h.goods * model.price_index for h in households)
+    # 消费 C
+    consumption = sum(h.goods * model.avg_price for h in households)
 
-    # 投资：企业库存增量（本期生产 - 已售出）
-    # 简化：企业库存变化 ≈ 本期生产量（假设初始库存≈0）
-    investment = sum(f.production * model.price_index for f in firms)
+    # 投资 I（企业生产 + R&D + 资本形成）
+    investment = sum(
+        f.production * f.price + f.rnd_investment + f.capital_stock * 0.02
+        for f in firms
+    )
 
-    # 政府支出：失业补贴
-    n_unemployed = len(model.unemployed_households)
-    gov_spending = model.subsidy * n_unemployed
+    # 政府支出 G（购买 + 补贴）→ 均计入 GDP
+    gov_spending = model.gov_purchase + model.subsidy * len(model.unemployed_households)
 
     return consumption + investment + gov_spending
 
 
 def compute_unemployment(model: EconomyModel) -> float:
-    """失业率 = 失业居民 / 总居民"""
     if not model.households:
         return 0.0
-    n_unemployed = sum(1 for h in model.households if not h.employed)
-    return n_unemployed / len(model.households)
+    return sum(1 for h in model.households if not h.employed) / len(model.households)
 
 
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 # 经济模型
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 
 class EconomyModel(Model):
     """
-    主模型
+    主模型 v3.0
 
-    Agent 执行顺序（分阶段调度）：
-      Bank  →  Firm  →  Household  →  Trader  →  Model（宏观清算）
+    执行顺序：
+      0. 外部冲击（随机触发）
+      1. Bank  → 2. Firm  → 3. Household  → 4. Trader
+      5. 政府活动（G / 补贴）
+      6. 宏观清算（股市 + 物价 + GDP）
 
-    经济逻辑：
-      1. 银行：支付存款利息，向企业/居民放贷
-      2. 企业：招聘，生产，销售，贷款，违约
-      3. 居民：领工资，消费，存款，买卖股票，找工作
-      4. 交易者：动量交易
-      5. 政府：收税（各 Agent step 内累加），发放补贴
-      6. 宏观清算：股票价格，物价指数，GDP，失业率，基尼系数
+    政策传导链（利率↑为例）：
+      利率↑ → Bank.repay_loan()成本↑ → Firm.cash↓ → apply_for_loan()需求↑
+      → 招聘↓ → Household失业↑ → 消费↓ → GDP↓ → 价格↓
+
+    金融加速器：
+      股价↓ → Firm抵押品价值↓ → 银行要求追加保证金
+      → 抛售资产 → 股价进一步↓（螺旋下行）
     """
 
     def __init__(self, **kwargs):
         super().__init__()
 
-        # ── 参数校验 + 注入默认值 ─────────────────────
+        # ── 参数注入 + 校验 ─────────────────────────────────
         for key, default_val in DEFAULTS.items():
             setattr(self, key, _clamp(kwargs.get(key, default_val), 0.0, 1e9))
 
-        # 政策参数单独存储（方便按钮直接读写）
-        self.tax_rate: float = _clamp(kwargs.get("tax_rate", DEFAULTS["tax_rate"]), 0.0, 1.0)
-        self.base_interest_rate: float = _clamp(kwargs.get("base_interest_rate", DEFAULTS["base_interest_rate"]), 0.0, 0.5)
-        self.min_wage: float = max(0.0, kwargs.get("min_wage", DEFAULTS["min_wage"]))
-        self.productivity: float = max(0.01, kwargs.get("productivity", DEFAULTS["productivity"]))
-        self.subsidy: float = max(0.0, kwargs.get("subsidy", DEFAULTS["subsidy"]))
+        self.tax_rate = _clamp(kwargs.get("tax_rate", DEFAULTS["tax_rate"]), 0.0, 0.45)
+        self.base_interest_rate = _clamp(kwargs.get("base_interest_rate", DEFAULTS["base_interest_rate"]), 0.0, 0.25)
+        self.min_wage = max(0.0, kwargs.get("min_wage", DEFAULTS["min_wage"]))
+        self.productivity = max(0.01, kwargs.get("productivity", DEFAULTS["productivity"]))
+        self.subsidy = max(0.0, kwargs.get("subsidy", DEFAULTS["subsidy"]))
+        self.gov_purchase = max(0.0, kwargs.get("gov_purchase", DEFAULTS["gov_purchase"]))
+        self.qe_amount = max(0.0, kwargs.get("qe_amount", DEFAULTS["qe_amount"]))
 
-        # ── Agent 分类缓存（避免 O(n²) 重复筛选） ────────
+        # ── Agent 分类缓存 ─────────────────────────────────
         self.households: list[Household] = []
         self.firms: list[Firm] = []
         self.banks: list[Bank] = []
         self.traders: list[Trader] = []
 
-        # ── 失业居民缓存（find_job 用，避免每次遍历） ───
-        self._unemployed_cache: list[Household] = []
-
-        # ── 市场状态 ───────────────────────────────────
+        # ── 市场状态 ───────────────────────────────────────
         self.stock_price: float = 100.0
         self.prev_stock_price: float = 100.0
-        self.price_index: float = 10.0
+        self.avg_price: float = 10.0
+        self.prev_avg_price: float = 10.0
         self.buy_orders: int = 0
         self.sell_orders: int = 0
 
-        # ── 政府财政 ───────────────────────────────────
-        self.govt_revenue: float = 0.0   # 税收收入（每个 Agent step 累加）
-        self.govt_expenditure: float = 0.0  # 财政支出（补贴，每轮单独计算）
+        # ── 政府财政 ───────────────────────────────────────
+        self.govt_revenue: float = 0.0
+        self.govt_expenditure: float = 0.0
 
-        # ── 信贷市场 ───────────────────────────────────
+        # ── 信贷市场 ───────────────────────────────────────
         self.total_loans_outstanding: float = 0.0
         self.total_dividends: float = 0.0
 
-        # ── 宏观指标 ───────────────────────────────────
+        # ── 宏观指标 ───────────────────────────────────────
         self.gdp: float = 0.0
         self.unemployment: float = 0.0
         self.gini: float = 0.0
 
-        # ── 金融风险指标 ────────────────────────────────
-        self.stock_volatility: float = 0.0      # 滚动波动率
-        self.stock_returns: list[float] = []    # 历史收益率（用于滚动窗口）
-        self.default_count: int = 0             # 违约企业数
-        self.bank_bad_debt_rate: float = 0.0    # 银行坏账率
+        # ── 金融风险指标 ───────────────────────────────────
+        self.stock_volatility: float = 0.0
+        self.stock_returns: list[float] = []
+        self.default_count: int = 0
+        self.bank_bad_debt_rate: float = 0.0
+        self.systemic_risk: float = 0.0    # 系统性风险（0~1）
+        self.bankrupt_count: int = 0       # 累计破产企业数
+        self.current_shock: str = ""        # 当前生效的冲击名称
 
-        # ── 周期计数器 ─────────────────────────────────
+        # ── 资本利得税收入 ─────────────────────────────────
+        self.capital_gains_tax_revenue: float = 0.0
+
+        # ── 周期计数器 ─────────────────────────────────────
         self.cycle: int = 0
 
-        # ── 创建 Agent（分类存储） ──────────────────────
-        n_households = max(1, int(kwargs.get("n_households", DEFAULTS["n_households"])))
-        n_firms = max(1, int(kwargs.get("n_firms", DEFAULTS["n_firms"])))
-        n_banks = max(1, int(kwargs.get("n_banks", DEFAULTS["n_banks"])))
-        n_traders = max(1, int(kwargs.get("n_traders", DEFAULTS["n_traders"])))
+        # ── 创建 Agent ─────────────────────────────────────
+        n_hh = max(1, int(kwargs.get("n_households", DEFAULTS["n_households"])))
+        n_firm = max(1, int(kwargs.get("n_firms", DEFAULTS["n_firms"])))
+        n_bank = max(1, int(kwargs.get("n_banks", DEFAULTS["n_banks"])))
+        n_trader = max(1, int(kwargs.get("n_traders", DEFAULTS["n_traders"])))
 
-        for _ in range(n_households):
+        for _ in range(n_hh):
             h = Household(self)
             self.agents.add(h)
             self.households.append(h)
-            self._unemployed_cache.append(h)
 
-        for _ in range(n_firms):
+        for _ in range(n_firm):
             f = Firm(self)
             self.agents.add(f)
             self.firms.append(f)
 
-        for _ in range(n_banks):
+        for _ in range(n_bank):
             b = Bank(self)
             self.agents.add(b)
             self.banks.append(b)
 
-        for _ in range(n_traders):
+        for _ in range(n_trader):
             t = Trader(self)
             self.agents.add(t)
             self.traders.append(t)
 
-        # ── 数据收集器（含 Agent 类型标签） ────────────
+        # ── 数据收集器 ─────────────────────────────────────
         self.datacollector = DataCollector(
             model_reporters={
-                "stock_price":       "stock_price",
-                "gdp":               "gdp",
-                "unemployment":      lambda m: round(m.unemployment * 100, 1),
-                "price_index":       lambda m: round(m.price_index, 2),
-                "gini":              lambda m: round(m.gini, 4),
-                "buy_orders":        "buy_orders",
-                "sell_orders":       "sell_orders",
-                "loans":            lambda m: round(m.total_loans_outstanding, 1),
-                "stock_volatility": lambda m: round(m.stock_volatility, 4),
-                "default_count":     "default_count",
-                "bad_debt_rate":    lambda m: round(m.bank_bad_debt_rate, 4),
-                "gov_revenue":      lambda m: round(m.govt_revenue, 1),
+                "stock_price":    "stock_price",
+                "avg_price":      lambda m: round(m.avg_price, 2),
+                "gdp":            "gdp",
+                "unemployment":   lambda m: round(m.unemployment * 100, 1),
+                "gini":           lambda m: round(m.gini, 4),
+                "buy_orders":     "buy_orders",
+                "sell_orders":    "sell_orders",
+                "loans":          lambda m: round(m.total_loans_outstanding, 1),
+                "stock_vol":      lambda m: round(m.stock_volatility, 4),
+                "default_count":  "default_count",
+                "bad_debt_rate":  lambda m: round(m.bank_bad_debt_rate, 4),
+                "systemic_risk":  lambda m: round(m.systemic_risk, 4),
+                "bankrupt_count": "bankrupt_count",
+                "gov_revenue":    lambda m: round(m.govt_revenue, 1),
+                "gov_expenditure": lambda m: round(m.govt_expenditure, 1),
+                "cap_gains_tax":  lambda m: round(m.capital_gains_tax_revenue, 1),
+                "n_firms":        lambda m: len(m.firms),
+                "n_households":   lambda m: len(m.households),
             },
             agent_reporters={
                 "cash":       lambda a: getattr(a, "cash", 0.0),
@@ -685,95 +1291,177 @@ class EconomyModel(Model):
         )
 
         logger.info(
-            "模型初始化完成：%d households, %d firms, %d banks, %d traders",
-            n_households, n_firms, n_banks, n_traders,
+            "模型 v3.0 初始化：%d households, %d firms, %d banks, %d traders",
+            n_hh, n_firm, n_bank, n_trader,
         )
 
-    # ── 属性代理（方便 UI 读取） ─────────────────────
+    # ── 属性代理 ───────────────────────────────────────────
 
     @property
     def unemployed_households(self) -> list[Household]:
-        """返回当前失业居民列表（实时过滤，不用缓存因为 find_job 会修改）"""
         return [h for h in self.households if not h.employed]
 
-    # ── 主循环（分阶段执行） ──────────────────────────
+    # ── 主循环 ─────────────────────────────────────────────
 
     def step(self) -> None:
-        """每轮执行：市场清算 → 各类 Agent 决策 → 政府 → 宏观指标"""
         self._reset_counters()
-        self._clear_unemployed_cache()
 
-        # 1. 银行决策（储备变化 → 放贷）
+        # 0. 外部冲击
+        self._apply_shock()
+
+        # 1. 银行
         for bank in self.banks:
             bank.step()
 
-        # 2. 企业决策（招聘 → 生产 → 销售 → 股息 → 贷款 → 违约）
-        for firm in self.firms:
+        # 2. 企业
+        for firm in self.firms[:]:   # [:] 因为 step 内可能移除破产企业
             firm.step()
 
-        # 3. 居民决策（工资 → 消费 → 存款 → 股票 → 求职）
-        for household in self.households:
-            household.step()
+        # 3. 居民
+        for hh in self.households:
+            hh.step()
 
-        # 4. 交易者决策（动量交易）
+        # 4. 交易者
         for trader in self.traders:
             trader.step()
 
-        # 5. 政府活动（发放失业补贴 = 财政支出）
-        n_unemployed = len(self.unemployed_households)
-        total_subsidy = self.subsidy * n_unemployed
-        self.govt_expenditure = total_subsidy
-        for h in self.unemployed_households:
-            h.cash += self.subsidy
-        # 补贴是支出，从财政收入中扣除（正确逻辑）
-        self.govt_revenue -= total_subsidy
+        # 5. 政府活动
+        self._gov_activity()
 
         # 6. 宏观清算
-        self._clear_market()
+        self._clear_markets()
         self._compute_macro()
         self._collect_data()
 
         self.cycle += 1
 
-    # ── 辅助方法 ────────────────────────────────────
+    # ── 辅助方法 ──────────────────────────────────────────
 
     def _reset_counters(self) -> None:
-        """重置每轮市场计数器"""
         self.buy_orders = 0
         self.sell_orders = 0
         self.govt_revenue = 0.0
         self.total_dividends = 0.0
         self.default_count = 0
+        self.capital_gains_tax_revenue = 0.0
 
-    def _clear_unemployed_cache(self) -> None:
-        """刷新失业居民列表（Household.find_job 会修改 employed）"""
-        self._unemployed_cache = self.unemployed_households
+    def _apply_shock(self) -> None:
+        """随机外部冲击（按概率触发）"""
+        if self.random.random() < DEFAULTS["shock_prob"]:
+            self.current_shock = ""
+            return
 
-    def _clear_market(self) -> None:
-        """股票价格 + 物价指数清算"""
-        # 股价：净买入压力 × 弹性系数 + 基本面噪声
+        shock_type = self.random.choice(list(SHOCK_EFFECTS.keys()))
+        effect = SHOCK_EFFECTS[shock_type]
+        logger.warning("⚡ 外部冲击触发：%s", effect["desc"])
+        self.current_shock = effect["desc"]
+
+        # TFP 变化
+        prod_delta = effect.get("productivity", None)
+        if callable(prod_delta):
+            self.productivity = _clamp(prod_delta(self.productivity), 0.1, 5.0)
+
+        # 银行恐慌：强制提取存款
+        if effect.get("bank_run", False):
+            self.systemic_risk = min(1.0, self.systemic_risk + 0.2)
+            for h in self.households:
+                if h.cash > 0:
+                    withdraw = h.cash * 0.3
+                    h.cash -= withdraw
+                    for b in self.banks:
+                        b.reserves -= withdraw
+
+        # 系统性风险累计
+        sentiment = effect.get("stock_sentiment", 0.0)
+        self.systemic_risk = min(1.0, self.systemic_risk + abs(sentiment) * 0.1)
+
+    def _gov_activity(self) -> None:
+        """政府活动：购买商品（G→GDP）、发放补贴"""
+        # 政府购买（新增：向企业采购，拉动总需求）
+        firms = self.firms
+        if self.gov_purchase > 0 and firms:
+            purchase_per_firm = self.gov_purchase / len(firms)
+            for f in firms:
+                f.cash += purchase_per_firm
+                f.inventory -= min(f.inventory, purchase_per_firm / f.price)
+
+        # 失业补贴
+        n_unemp = len(self.unemployed_households)
+        total_subsidy = self.subsidy * n_unemp
+        self.govt_expenditure = total_subsidy + self.gov_purchase
+        for h in self.unemployed_households:
+            h.cash += self.subsidy
+        self.govt_revenue -= total_subsidy + self.gov_purchase
+
+        # 量化宽松：央行直接购买股票（推高股价）
+        if self.qe_amount > 0 and self.traders:
+            self.stock_price += self.qe_amount / len(self.traders) * 0.01
+
+    def _clear_markets(self) -> None:
+        """股市 + 物价清算"""
+        # ── 股市：戈登模型锚 + 供需扰动 + 系统风险 ─────────
         self.prev_stock_price = self.stock_price
+
+        # 戈登模型内在价值（修复维度错配）：
+        # total_dividends = 累积每轮总额（5轮 = 5×单轮）
+        # 需除以周期数 + 乘以年化系数（≈12）得到年度股息
+        cycles_per_year = 12
+        avg_div_per_cycle = _safe_div(self.total_dividends, max(1, self.cycle + 1), 0.0)
+        avg_div_annual = avg_div_per_cycle * cycles_per_year  # 年化股息
+        avg_shares = max(1, len(self.firms) * 50)
+        div_per_share_annual = avg_div_annual / avg_shares
+
+        # Gordon: P = D / (r - g)，g=0（简化：股息永续，当前年化）
+        # 折现率用存款利率（风险资产溢价 ~2%）
+        disc_rate = self.base_interest_rate + 0.02
+        gordon_price = _safe_div(div_per_share_annual, disc_rate, 50.0)
+        # 合理区间：[20, 500]
+        gordon_price = _clamp(gordon_price, 20.0, 500.0)
+
+        # 供需定价（主导短期波动）
         net_order = self.buy_orders - self.sell_orders
         n = len(self.traders) or 1
-        delta = net_order / (n * 2) * DEFAULTS["stock_adjust_speed"]
-        self.stock_price *= 1 + delta
-        self.stock_price += self.random.uniform(-0.5, 0.5)
+        supply_delta = net_order / (n * 2) * DEFAULTS["stock_adjust_speed"]
+
+        # 系统性风险压低股价
+        risk_adj = 1.0 - self.systemic_risk * 0.3
+
+        # 融合：供需主导（70%）+ Gordon 锚定（30%）
+        self.stock_price = (
+            self.stock_price * (1 + supply_delta) * 0.70 * risk_adj
+            + gordon_price * 0.30
+        )
+        self.stock_price += self.random.uniform(-1.0, 1.0)
         self.stock_price = max(1.0, self.stock_price)
 
-        # 股价波动率（滚动窗口标准差）
+        # 滚动波动率
         if self.prev_stock_price > 0:
             ret = (self.stock_price - self.prev_stock_price) / self.prev_stock_price
             self.stock_returns.append(ret)
-            window = DEFAULTS["vol_window"]
-            if len(self.stock_returns) > window:
+            winsz = DEFAULTS["vol_window"]
+            if len(self.stock_returns) > winsz:
                 self.stock_returns.pop(0)
             if len(self.stock_returns) >= 2:
                 self.stock_volatility = float(np.std(self.stock_returns) * np.sqrt(252))
 
-        # 物价：通胀压力 = (GDP - target) / target × speed
-        inflation = (self.gdp - DEFAULTS["gdp_target"]) / DEFAULTS["gdp_target"] * DEFAULTS["price_adjust_speed"]
-        self.price_index += self.random.uniform(-0.3, 0.3) + inflation
-        self.price_index = max(1.0, self.price_index)
+        # 系统性风险衰减（每轮自然消退一点）
+        self.systemic_risk = max(0.0, self.systemic_risk - 0.01)
+
+        # ── 物价：加权平均企业价格 + 通胀压力 ───────────────
+        self.prev_avg_price = self.avg_price
+        if self.firms:
+            prices = [f.price for f in self.firms if f.inventory > 0]
+            self.avg_price = np.mean(prices) if prices else self.avg_price
+        else:
+            self.avg_price = self.price_adjust_speed * 10
+
+        # 通胀压力 = (GDP - target) / target × speed
+        inflation = (
+            (self.gdp - DEFAULTS["gdp_target"]) / DEFAULTS["gdp_target"]
+            * DEFAULTS["price_adjust_speed"]
+        )
+        self.avg_price += self.random.uniform(-0.2, 0.2) + inflation
+        self.avg_price = max(1.0, self.avg_price)
 
     def _compute_macro(self) -> None:
         """计算宏观指标"""
@@ -781,7 +1469,6 @@ class EconomyModel(Model):
         self.unemployment = compute_unemployment(self)
         self.gini = compute_gini(self)
 
-        # 金融风险
         if self.firms:
             self.default_count = sum(
                 1 for f in self.firms
@@ -790,28 +1477,33 @@ class EconomyModel(Model):
         if self.banks:
             total_bad = sum(b.bad_debts for b in self.banks)
             total_loans = sum(b.total_loans for b in self.banks) + 1e-6
-            self.bank_bad_debt_rate = total_bad / total_loans
+            # 坏账率：[0, 1]，防止负数/超限
+            self.bank_bad_debt_rate = _clamp(total_bad / total_loans, 0.0, 1.0)
 
     def _collect_data(self) -> None:
-        """收集数据"""
         self.datacollector.collect(self)
 
-    # ─────────────────────────────────────────────
-    # 政策干预方法（UI 按钮直接调用）
-    # ─────────────────────────────────────────────
+    # ── 政策干预（UI 按钮调用） ─────────────────────────────
 
     def adjust_interest_rate(self, delta: float) -> None:
-        """调整基准利率"""
+        """利率政策传导：↑利率→企业成本↑→招聘↓→失业↑"""
         self.base_interest_rate = _clamp(self.base_interest_rate + delta, 0.0, 0.25)
 
     def adjust_tax_rate(self, delta: float) -> None:
-        """调整所得税率"""
         self.tax_rate = _clamp(self.tax_rate + delta, 0.0, 0.45)
 
     def adjust_subsidy(self, delta: float) -> None:
-        """调整失业补贴"""
         self.subsidy = _clamp(self.subsidy + delta, 0.0, 50.0)
 
     def adjust_productivity(self, delta: float) -> None:
-        """调整生产率"""
-        self.productivity = _clamp(self.productivity + delta, 0.1, 3.0)
+        self.productivity = _clamp(self.productivity + delta, 0.1, 5.0)
+
+    def adjust_gov_purchase(self, delta: float) -> None:
+        """政府购买（扩张性财政政策）"""
+        self.gov_purchase = _clamp(self.gov_purchase + delta, 0.0, 200.0)
+
+    def adjust_capital_gains_tax(self, delta: float) -> None:
+        """资本利得税（抑制投机）"""
+        self.capital_gains_tax = _clamp(
+            getattr(self, "capital_gains_tax", 0.10) + delta, 0.0, 0.50
+        )
