@@ -1,20 +1,20 @@
 """
-Mesa 经济沙盘 - 可视化服务器 (Mesa 3.x)
+Mesa 经济沙盘 - 自定义 Solara 应用（完整控制版）
 运行: solara run server.py
 访问: http://127.0.0.1:8521
+
+完全响应式：参数改动实时生效，不中断模拟。
 """
 
 from __future__ import annotations
 
-import base64
 import io
 import logging
 from typing import Any
 
 import solara
-from mesa import Model
-from mesa.visualization import SolaraViz
-from mesa.visualization import make_plot_component
+from matplotlib.figure import Figure
+import pandas as pd
 
 from model import EconomyModel, Household, Firm, Bank, Trader
 
@@ -26,170 +26,166 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-logger = logging.getLogger(__name__)
-
+logger = logging.getLogger("econ")
 
 # ─────────────────────────────────────────────
 # 全局配置
 # ─────────────────────────────────────────────
 
-PLAY_INTERVAL_MS = 500
 APP_NAME = "经济沙盘"
-
-# 样式常量
 STYLE_CONTAINER = (
     "background:linear-gradient(135deg,#0f172a,#1e3a5f);"
     "color:#e2e8f0;border-radius:12px;padding:18px 20px;"
     "font-family:Segoe UI,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,0.3);"
-    "line-height:2;"
 )
 STYLE_HEADER = (
     "font-size:16px;font-weight:700;margin-bottom:10px;"
     "border-bottom:1px solid #334155;padding-bottom:8px;"
 )
-STYLE_GRID = (
-    "display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;font-size:13px;"
-)
+STYLE_GRID = "display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;font-size:13px;"
 
-# 图表配置（中文名映射）
-CHART_CONFIG = {
-    "stock_price": "股价指数",
-    "gdp": "GDP产出",
-    "unemployment": "失业率(%)",
-    "price_index": "物价指数",
-    "gini": "基尼系数",
-    "buy_orders": "买入订单",
-    "loans": "贷款余额",
-    "stock_volatility": "股价波动率",
-    "bad_debt_rate": "银行坏账率",
-    "default_count": "违约企业数",
-}
+CHART_CONFIG = [
+    ("stock_price", "股价指数"),
+    ("gdp", "GDP产出"),
+    ("unemployment", "失业率(%)"),
+    ("price_index", "物价指数"),
+    ("gini", "基尼系数"),
+    ("buy_orders", "买入订单"),
+    ("loans", "贷款余额"),
+    ("stock_volatility", "股价波动率"),
+    ("bad_debt_rate", "银行坏账率"),
+    ("default_count", "违约企业数"),
+]
 
-# 场景预设
 SCENARIOS = {
     "默认": {},
     "经济危机": {
-        "n_households": 30,
-        "n_firms": 5,
-        "base_interest_rate": 0.15,
-        "tax_rate": 0.25,
+        "n_households": 30, "n_firms": 5,
+        "base_interest_rate": 0.15, "tax_rate": 0.25,
     },
     "宽松政策": {
-        "base_interest_rate": 0.01,
-        "tax_rate": 0.05,
-        "subsidy": 15.0,
+        "base_interest_rate": 0.01, "tax_rate": 0.05, "subsidy": 15.0,
     },
     "高税收高福利": {
-        "tax_rate": 0.40,
-        "subsidy": 20.0,
-        "min_wage": 15.0,
+        "tax_rate": 0.40, "subsidy": 20.0, "min_wage": 15.0,
     },
     "自由市场": {
-        "tax_rate": 0.05,
-        "base_interest_rate": 0.02,
-        "subsidy": 0.0,
-        "min_wage": 0.0,
+        "tax_rate": 0.05, "base_interest_rate": 0.02,
+        "subsidy": 0.0, "min_wage": 0.0,
     },
 }
 
-# 模型参数
-_PARAM_DEFAULTS = {
-    "n_households":  {"min": 5,  "max": 80,  "step": 5,   "default": 20, "label": "家庭数量"},
-    "n_firms":       {"min": 3,  "max": 40,  "step": 1,   "default": 10, "label": "企业数量"},
-    "n_traders":     {"min": 5,  "max": 80,  "step": 5,   "default": 20, "label": "交易者数量"},
-    "tax_rate":      {"min": 0.0,"max": 0.45,"step": 0.01,"default": 0.15,"label": "所得税率", "fmt": "0%"},
-    "base_interest_rate": {"min": 0.0,"max": 0.25,"step": 0.01,"default": 0.05,"label": "基准利率", "fmt": "0%"},
-    "min_wage":      {"min": 0.0,"max": 20.0, "step": 0.5, "default": 7.0,"label": "最低工资"},
-    "productivity":  {"min": 0.1,"max": 3.0,  "step": 0.1, "default": 1.0,"label": "生产率"},
-    "subsidy":       {"min": 0.0,"max": 20.0, "step": 0.5, "default": 0.0,"label": "失业补贴"},
+PARAM_CONFIG = {
+    "n_households":      {"min": 5,  "max": 80,  "step": 5,   "default": 20,  "label": "家庭数量",    "fmt": None},
+    "n_firms":           {"min": 3,  "max": 40,  "step": 1,   "default": 10,  "label": "企业数量",    "fmt": None},
+    "n_traders":         {"min": 5,  "max": 80,  "step": 5,   "default": 20,  "label": "交易者数量",  "fmt": None},
+    "tax_rate":          {"min": 0.0,"max": 0.45,"step": 0.01, "default": 0.15,"label": "所得税率",   "fmt": "0%"},
+    "base_interest_rate":{"min": 0.0,"max": 0.25,"step": 0.01, "default": 0.05,"label": "基准利率",   "fmt": "0%"},
+    "min_wage":          {"min": 0.0,"max": 20.0,"step": 0.5, "default": 7.0, "label": "最低工资",   "fmt": None},
+    "productivity":      {"min": 0.1,"max": 3.0, "step": 0.1, "default": 1.0, "label": "生产率",     "fmt": None},
+    "subsidy":           {"min": 0.0,"max": 20.0,"step": 0.5, "default": 0.0,  "label": "失业补贴",   "fmt": None},
 }
-
 
 # ─────────────────────────────────────────────
 # 工具函数
 # ─────────────────────────────────────────────
 
-def get_agent_groups(model: Model) -> tuple[list[Firm], list[Household], list[Trader]]:
-    """从模型中分类获取所有主体"""
+def get_agent_groups(model: EconomyModel):
     firms = [a for a in model.agents if isinstance(a, Firm)]
     households = [a for a in model.agents if isinstance(a, Household)]
     traders = [a for a in model.agents if isinstance(a, Trader)]
-    return firms, households, traders
+    banks = [a for a in model.agents if isinstance(a, Bank)]
+    return firms, households, traders, banks
 
 
-def build_macro_stats(model: Model) -> dict[str, Any]:
-    """计算宏观统计数据"""
-    firms, households, traders = get_agent_groups(model)
+def build_macro_stats(model: EconomyModel) -> dict[str, Any]:
+    firms, households, traders, banks = get_agent_groups(model)
     n_hh = len(households)
     employed = sum(1 for h in households if h.employed)
     emp_rate = (employed / n_hh * 100) if n_hh > 0 else 0.0
-
     return {
-        "周期": getattr(model, "cycle", 0),
-        "企业数": len(firms),
-        "就业人数": employed,
-        "家庭数": n_hh,
-        "就业率": f"{emp_rate:.1f}%",
-        "失业人数": n_hh - employed if n_hh > 0 else 0,
-        "交易者": len(traders),
-        "总产出": f"{sum(getattr(f, 'production', 0) for f in firms):.1f}",
-        "股息": f"{getattr(model, 'total_dividends', 0.0):.1f}",
-        "税率": f"{getattr(model, 'tax_rate', 0):.0%}",
-        "利率": f"{getattr(model, 'base_interest_rate', 0):.0%}",
-        "物价": f"{getattr(model, 'price_index', 0):.2f}",
-        "财政收入": f"{getattr(model, 'govt_revenue', 0):.1f}",
-        "贷款余额": f"{getattr(model, 'total_loans_outstanding', 0):.1f}",
-        # 金融风险
-        "波动率": f"{getattr(model, 'stock_volatility', 0):.3f}",
-        "违约数": getattr(model, "default_count", 0),
-        "坏账率": f"{getattr(model, 'bank_bad_debt_rate', 0):.1%}",
+        "cycle":         model.cycle,
+        "n_firms":       len(firms),
+        "employed":      employed,
+        "n_households":  n_hh,
+        "emp_rate":      emp_rate,
+        "unemployed":    n_hh - employed if n_hh > 0 else 0,
+        "n_traders":     len(traders),
+        "total_prod":    sum(getattr(f, "production", 0) for f in firms),
+        "dividends":     model.total_dividends,
+        "tax_rate":      model.tax_rate,
+        "interest_rate": model.base_interest_rate,
+        "price_index":   model.price_index,
+        "govt_rev":      model.govt_revenue,
+        "loans":         model.total_loans_outstanding,
+        "volatility":    model.stock_volatility,
+        "default_count": model.default_count,
+        "bad_debt_rate": model.bank_bad_debt_rate,
+        "stock_price":   model.stock_price,
+        "gdp":           model.gdp,
+        "unemployment":  model.unemployment,
+        "gini":          model.gini,
     }
 
 
-def build_model_params() -> dict[str, dict]:
-    """构建参数字典"""
-    params = {}
-    for name, cfg in _PARAM_DEFAULTS.items():
-        is_int = isinstance(cfg["step"], int) or cfg["step"] == int(cfg["step"])
-        params[name] = {
-            "type":  "SliderInt" if is_int else "SliderFloat",
-            "value": cfg["default"],
-            "min":   cfg["min"],
-            "max":   cfg["max"],
-            "step":  cfg["step"],
-            "label": cfg["label"],
-        }
-        if cfg.get("fmt"):
-            params[name]["format"] = cfg["fmt"]
-    return params
-
-
-def create_charts(config: dict[str, str]) -> list:
-    """创建图表组件"""
-    charts = []
-    for metric_key, metric_name in config.items():
-        try:
-            charts.append(make_plot_component(metric_key, backend="matplotlib"))
-        except Exception as e:
-            logger.error("图表创建失败 '%s': %s", metric_key, e)
-    return charts
-
-
-def get_cycle_stage(model: Model) -> tuple[str, str]:
-    """识别经济周期阶段"""
-    gdp = getattr(model, "gdp", 0)
-    unemp = getattr(model, "unemployment", 0)
-    
-    if gdp > 2000 and unemp < 0.1:
+def get_cycle_stage(model: EconomyModel) -> tuple[str, str]:
+    if model.gdp > 2000 and model.unemployment < 0.1:
         return "繁荣", "#22c55e"
-    elif gdp > 1500 and unemp < 0.15:
+    elif model.gdp > 1500 and model.unemployment < 0.15:
         return "复苏", "#84cc16"
-    elif gdp > 1000:
+    elif model.gdp > 1000:
         return "平稳", "#eab308"
-    elif unemp > 0.25:
+    elif model.unemployment > 0.25:
         return "萧条", "#ef4444"
     else:
         return "衰退", "#f97316"
+
+
+def render_matplotlib_figure(data: list[float], label: str, color: str = "#3b82f6") -> Figure:
+    """用 matplotlib 渲染折线图，返回 Figure 对象"""
+    fig = Figure(facecolor="#0f172a", dpi=80)
+    ax = fig.add_subplot(facecolor="#0f172a")
+    ax.plot(data, color=color, linewidth=1.5)
+    ax.set_title(label, color="#e2e8f0", fontsize=10)
+    ax.tick_params(colors="#94a3b8", labelsize=7)
+    ax.xaxis.label.set_color("#94a3b8")
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#334155")
+    fig.tight_layout(pad=0.5)
+    return fig
+
+
+def get_chart_data(model: EconomyModel) -> dict[str, list]:
+    """从 datacollector 提取所有指标的时序数据"""
+    if not hasattr(model, "datacollector") or model.datacollector is None:
+        return {}
+    df = model.datacollector.get_model_vars_dataframe()
+    result = {}
+    for key, _ in CHART_CONFIG:
+        if key in df.columns:
+            vals = df[key].dropna().tolist()
+            # 转换 unemployment: 它存的是百分比数字 15.0，不是小数
+            if key == "unemployment":
+                vals = [v / 100 for v in vals] if vals else []
+            result[key] = vals
+    return result
+
+
+# ─────────────────────────────────────────────
+# 全局响应式状态（模型引用 + 参数）
+# ─────────────────────────────────────────────
+
+model_ref: solara.Reactive[EconomyModel | None] = solara.reactive(None)
+
+# 步进循环控制
+running_ref: solara.Reactive[bool] = solara.reactive(False)
+play_task_ref: solara.Reactive[Any] = solara.reactive(None)
+
+
+def reset_model(params: dict):
+    """完全重置模型（用于初始化或重建）"""
+    model_ref.set(EconomyModel(**params))
+    logger.info("模型已重置，参数: %s", params)
 
 
 # ─────────────────────────────────────────────
@@ -197,33 +193,180 @@ def get_cycle_stage(model: Model) -> tuple[str, str]:
 # ─────────────────────────────────────────────
 
 @solara.component
-def MacroStats(model: Model):
-    """宏观统计面板"""
-    stats = build_macro_stats(model)
-    stage, stage_color = get_cycle_stage(model)
+def ControlBar(initial_params: dict):
+    """顶部控制栏：初始化、重置、播放/暂停"""
+    playing = solara.use_reactive(False)
+
+    def on_init():
+        reset_model(initial_params)
+
+    def on_reset():
+        params = _get_current_params()
+        reset_model(params)
+        playing.set(False)
+
+    def on_step():
+        m = model_ref.value
+        if m is not None:
+            m.step()
+
+    def on_play():
+        if playing.value:
+            playing.set(False)
+        else:
+            playing.set(True)
+
+    # 播放循环
+    def play_loop():
+        while playing.value:
+            m = model_ref.value
+            if m is not None:
+                m.step()
+            import time
+            time.sleep(0.5)
+        playing.set(False)
+
+    import threading
+    if playing.value and (play_task_ref.value is None or not play_task_ref.value.is_alive()):
+        t = threading.Thread(target=play_loop, daemon=True)
+        t.start()
+        play_task_ref.set(t)
+
+    solara.use_effect(lambda: on_init(), [])
+    solara.use_effect(
+        lambda: playing.set(running_ref.value),
+        [running_ref.value],
+    )
+
+    with solara.Row(gap="8px", align="center"):
+        solara.Button("▶ 播放", on_click=on_play, color="success",
+                      disabled=model_ref.value is None)
+        solara.Button("⏸ 暂停", on_click=lambda: playing.set(False),
+                      disabled=not playing.value)
+        solara.Button("步进", on_click=on_step,
+                      disabled=model_ref.value is None)
+        solara.Button("重置", on_click=on_reset, color="error")
+        solara.Text(f"周期: {model_ref.value.cycle if model_ref.value else 0}",
+                    style="color:#e2e8f0;margin-left:8px;font-size:14px;")
+
+
+@solara.component
+def ParamSliders():
+    """参数滑块：实时调整经济参数"""
+    n_households = solara.use_reactive(20)
+    n_firms = solara.use_reactive(10)
+    n_traders = solara.use_reactive(20)
+    tax_rate = solara.use_reactive(0.15)
+    base_interest_rate = solara.use_reactive(0.05)
+    min_wage = solara.use_reactive(7.0)
+    productivity = solara.use_reactive(1.0)
+    subsidy = solara.use_reactive(0.0)
+
+    def apply_immediately(key: str, value: Any):
+        """立即应用到当前运行的模型（不重置模拟）"""
+        m = model_ref.value
+        if m is not None and hasattr(m, key):
+            setattr(m, key, value)
+            logger.info("实时调整 %s = %s", key, value)
+
+    def on_change_factory(var_name: str, slider_ref: solara.Reactive):
+        def handler(value):
+            slider_ref.set(value)
+            apply_immediately(var_name, value)
+        return handler
+
+    with solara.Card("⚙️ 经济参数（实时生效）", margin=0):
+        with solara.Grid(columns=2):
+            for key, cfg in PARAM_CONFIG.items():
+                if key == "n_households":
+                    solara.FloatSlider(
+                        label=cfg["label"], value=n_households,
+                        min=cfg["min"], max=cfg["max"], step=int(cfg["step"]),
+                        format=cfg.get("fmt"),
+                        on_value=lambda v, k=key: on_change_factory(k, n_households)(v),
+                    )
+                elif key == "n_firms":
+                    solara.FloatSlider(
+                        label=cfg["label"], value=n_firms,
+                        min=cfg["min"], max=cfg["max"], step=int(cfg["step"]),
+                        on_value=lambda v, k=key: on_change_factory(k, n_firms)(v),
+                    )
+                elif key == "n_traders":
+                    solara.FloatSlider(
+                        label=cfg["label"], value=n_traders,
+                        min=cfg["min"], max=cfg["max"], step=int(cfg["step"]),
+                        on_value=lambda v, k=key: on_change_factory(k, n_traders)(v),
+                    )
+                elif key == "tax_rate":
+                    solara.FloatSlider(
+                        label=cfg["label"], value=tax_rate,
+                        min=cfg["min"], max=cfg["max"], step=cfg["step"],
+                        format="0%", on_value=lambda v: (tax_rate.set(v), apply_immediately("tax_rate", v)),
+                    )
+                elif key == "base_interest_rate":
+                    solara.FloatSlider(
+                        label=cfg["label"], value=base_interest_rate,
+                        min=cfg["min"], max=cfg["max"], step=cfg["step"],
+                        format="0%", on_value=lambda v: (base_interest_rate.set(v), apply_immediately("base_interest_rate", v)),
+                    )
+                elif key == "min_wage":
+                    solara.FloatSlider(
+                        label=cfg["label"], value=min_wage,
+                        min=cfg["min"], max=cfg["max"], step=cfg["step"],
+                        on_value=lambda v: (min_wage.set(v), apply_immediately("min_wage", v)),
+                    )
+                elif key == "productivity":
+                    solara.FloatSlider(
+                        label=cfg["label"], value=productivity,
+                        min=cfg["min"], max=cfg["max"], step=cfg["step"],
+                        on_value=lambda v: (productivity.set(v), apply_immediately("productivity", v)),
+                    )
+                elif key == "subsidy":
+                    solara.FloatSlider(
+                        label=cfg["label"], value=subsidy,
+                        min=cfg["min"], max=cfg["max"], step=cfg["step"],
+                        on_value=lambda v: (subsidy.set(v), apply_immediately("subsidy", v)),
+                    )
+
+
+@solara.component
+def MacroStatsPanel():
+    """宏观快照面板"""
+    m = model_ref.value
+    if m is None:
+        solara.Text("模型加载中...")
+        return
+
+    stats = build_macro_stats(m)
+    stage, stage_color = get_cycle_stage(m)
+
+    vol = stats["volatility"]
+    vol_color = "#ef4444" if vol > 0.3 else "#e2e8f0"
+    bdr = stats["bad_debt_rate"]
+    bdr_color = "#ef4444" if bdr > 0.1 else "#e2e8f0"
 
     html = (
         f"<div style='{STYLE_CONTAINER}'>"
-        f"  <div style='{STYLE_HEADER}'>📊 宏观快照 — 第 {stats['周期']} 轮 "
-        f"    <span style='background:{stage_color};padding:2px 8px;border-radius:4px;margin-left:10px;'>{stage}</span>"
+        f"  <div style='{STYLE_HEADER}'>📊 宏观快照 — 第 {stats['cycle']} 轮 "
+        f"    <span style='background:{stage_color};padding:2px 10px;border-radius:6px;margin-left:12px;font-size:13px;'>{stage}</span>"
         f"  </div>"
         f"  <div style='{STYLE_GRID}'>"
-        f"    <div>🏭 企业: {stats['企业数']}</div>"
-        f"    <div>👥 就业: {stats['就业人数']}/{stats['家庭数']} ({stats['就业率']})</div>"
-        f"    <div>📉 失业: {stats['失业人数']}</div>"
-        f"    <div>📈 交易者: {stats['交易者']}</div>"
-        f"    <div>📦 产出: {stats['总产出']}</div>"
-        f"    <div>💰 股息: {stats['股息']}</div>"
-        f"    <div>📋 税率: {stats['税率']}</div>"
-        f"    <div>💵 利率: {stats['利率']}</div>"
-        f"    <div>🏷️ 物价: {stats['物价']}</div>"
-        f"    <div>🏛️ 财政: {stats['财政收入']}</div>"
-        f"    <div>💳 贷款: {stats['贷款余额']}</div>"
+        f"    <div>🏭 <b>企业</b>: {stats['n_firms']}</div>"
+        f"    <div>👥 <b>就业</b>: {stats['employed']}/{stats['n_households']} ({stats['emp_rate']:.1f}%)</div>"
+        f"    <div>📉 <b>失业</b>: {stats['unemployed']}人</div>"
+        f"    <div>📈 <b>交易者</b>: {stats['n_traders']}</div>"
+        f"    <div>📦 <b>产出</b>: {stats['total_prod']:.1f}</div>"
+        f"    <div>💰 <b>股息</b>: {stats['dividends']:.1f}</div>"
+        f"    <div>📋 <b>税率</b>: {stats['tax_rate']:.0%}</div>"
+        f"    <div>💵 <b>利率</b>: {stats['interest_rate']:.0%}</div>"
+        f"    <div>🏷️ <b>物价</b>: {stats['price_index']:.2f}</div>"
+        f"    <div>🏛️ <b>财政</b>: {stats['govt_rev']:.1f}</div>"
+        f"    <div>💳 <b>贷款</b>: {stats['loans']:.1f}</div>"
         f"  </div>"
-        f"  <div style='border-top:1px solid #334155;margin-top:8px;padding-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;font-size:13px;'>"
-        f"    <div>📊 波动率: {stats['波动率']}</div>"
-        f"    <div>⚠️ 违约数: {stats['违约数']}</div>"
-        f"    <div>🏦 坏账率: {stats['坏账率']}</div>"
+        f"  <div style='border-top:1px solid #334155;margin-top:8px;padding-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px 16px;font-size:13px;'>"
+        f"    <div>📊 波动率: <span style='color:{vol_color}'>{vol:.3f}</span></div>"
+        f"    <div>🚨 违约: {stats['default_count']}家</div>"
+        f"    <div>🏦 坏账率: <span style='color:{bdr_color}'>{bdr:.1%}</span></div>"
         f"  </div>"
         f"</div>"
     )
@@ -231,57 +374,62 @@ def MacroStats(model: Model):
 
 
 @solara.component
-def PolicyPanel(model: Model):
-    """政策干预面板"""
-    
-    def on_cut_rate():
-        model.adjust_interest_rate(-0.005)
-        logger.info("政策: 降息50BP → %.1f%%", model.base_interest_rate * 100)
-    
-    def on_hike_rate():
-        model.adjust_interest_rate(0.005)
-        logger.info("政策: 加息50BP → %.1f%%", model.base_interest_rate * 100)
-    
-    def on_cut_tax():
-        model.adjust_tax_rate(-0.05)
-        logger.info("政策: 减税5%% → %.1f%%", model.tax_rate * 100)
-    
-    def on_hike_tax():
-        model.adjust_tax_rate(0.05)
-        logger.info("政策: 加税5%% → %.1f%%", model.tax_rate * 100)
-    
-    def on_add_subsidy():
-        model.adjust_subsidy(5.0)
-        logger.info("政策: 增发补贴+5 → %.1f", model.subsidy)
-    
-    def on_cut_subsidy():
-        model.adjust_subsidy(-5.0)
-        logger.info("政策: 削减补贴-5 → %.1f", model.subsidy)
-    
-    with solara.Card("🎛️ 政策工具", margin=0):
-        with solara.Row(gap="8px"):
-            solara.Button("降息50BP", on_click=on_cut_rate, color="primary")
-            solara.Button("加息50BP", on_click=on_hike_rate, color="primary")
-        with solara.Row(gap="8px"):
-            solara.Button("减税5%", on_click=on_cut_tax, color="success")
-            solara.Button("加税5%", on_click=on_hike_tax, color="error")
-        with solara.Row(gap="8px"):
-            solara.Button("增发补贴+5", on_click=on_add_subsidy, color="warning")
-            solara.Button("削减补贴-5", on_click=on_cut_subsidy, color="warning")
+def PolicyPanel():
+    """政策干预面板（直接调模型方法）"""
+    def adjust(model_attr: str, delta: float, label: str):
+        m = model_ref.value
+        if m is None:
+            return
+        old = getattr(m, model_attr)
+        new_val = max(0.0, min(getattr(m, model_attr) + delta, 0.5))
+        setattr(m, model_attr, new_val)
+        logger.info("政策 %s: %.4f → %.4f", label, old, new_val)
+
+    with solara.Card("🎛️ 政策工具（实时生效）", margin=0):
+        with solara.Row(gap="6px"):
+            solara.Button("降息50BP", on_click=lambda: adjust("base_interest_rate", -0.005, "降息"),
+                          color="primary", style="font-size:12px;")
+            solara.Button("加息50BP", on_click=lambda: adjust("base_interest_rate", 0.005, "加息"),
+                          color="primary", style="font-size:12px;")
+        with solara.Row(gap="6px"):
+            solara.Button("减税5%", on_click=lambda: adjust("tax_rate", -0.05, "减税"),
+                          color="success", style="font-size:12px;")
+            solara.Button("加税5%", on_click=lambda: adjust("tax_rate", 0.05, "加税"),
+                          color="error", style="font-size:12px;")
+        with solara.Row(gap="6px"):
+            solara.Button("补贴+5", on_click=lambda: adjust("subsidy", 5.0, "补贴+"),
+                          color="warning", style="font-size:12px;")
+            solara.Button("削减-5", on_click=lambda: adjust("subsidy", -5.0, "补贴-"),
+                          color="warning", style="font-size:12px;")
+        with solara.Row(gap="6px"):
+            solara.Button("生产率+10%", on_click=lambda: adjust("productivity", 0.1, "生产率+"),
+                          style="font-size:12px;")
+            solara.Button("生产率-10%", on_click=lambda: adjust("productivity", -0.1, "生产率-"),
+                          style="font-size:12px;")
+        
+        m = model_ref.value
+        if m:
+            solara.Text(
+                f"当前: 税率{m.tax_rate:.0%} 利率{m.base_interest_rate:.0%} 补贴{m.subsidy:.1f} 生产率{m.productivity:.1f}",
+                style="color:#94a3b8;font-size:11px;margin-top:8px;"
+            )
 
 
 @solara.component
-def ScenarioPanel(model: Model):
+def ScenarioPanel():
     """场景预设面板"""
     selected = solara.use_reactive("默认")
-    
+
     def apply_scenario():
         scenario = SCENARIOS.get(selected.value, {})
+        m = model_ref.value
+        if m is None:
+            return
         for key, value in scenario.items():
-            if hasattr(model, key):
-                setattr(model, key, value)
-        logger.info("应用场景: %s → %s", selected.value, scenario)
-    
+            if hasattr(m, key):
+                setattr(m, key, value)
+                logger.info("场景 '%s': %s = %s", selected.value, key, value)
+
     with solara.Card("🎬 场景预设", margin=0):
         solara.Select(
             label="选择场景",
@@ -292,187 +440,215 @@ def ScenarioPanel(model: Model):
 
 
 @solara.component
-def ExportPanel(model: Model):
-    """数据导出面板"""
-    
-    def get_csv_bytes():
-        """生成CSV二进制数据"""
-        df_model = model.datacollector.get_model_vars_dataframe()
-        df_agents = model.datacollector.get_agent_vars_dataframe()
-        
-        buffer = io.StringIO()
-        buffer.write("# 模型级指标\n")
-        df_model.to_csv(buffer)
-        buffer.write("\n# Agent级数据\n")
-        df_agents.to_csv(buffer)
-        
-        return buffer.getvalue().encode("utf-8")
-    
-    csv_bytes, set_csv_bytes = solara.use_state(lambda: b"")
-    filename = f"econ_cycle{getattr(model, 'cycle', 0)}.csv"
-    
-    def on_export():
-        set_csv_bytes(get_csv_bytes())
-        logger.info("导出成功，%d 字节", len(csv_bytes))
-    
-    with solara.Card("📥 数据导出", margin=0):
-        with solara.Row():
-            solara.Button("导出CSV", on_click=on_export, color="primary", icon_name="mdi-download")
-            solara.Text(f"周期: {getattr(model, 'cycle', 0)}")
-        
-        if csv_bytes:
-            solara.FileDownload(
-                data=csv_bytes,
-                filename=filename,
-                label="📥 点击下载 CSV",
-            )
-
-
-@solara.component
-def DebugLogPanel(model: Model):
-    """实时调试日志面板"""
-    log_lines = solara.use_reactive(list[str])
-    max_lines = 50
-    
-    def add_log(msg: str):
-        lines = log_lines.value
-        lines.append(msg)
-        if len(lines) > max_lines:
-            lines = lines[-max_lines:]
-        log_lines.set(lines)
-    
-    # 采样部分 Agent 行为
-    firms = [a for a in model.agents if isinstance(a, Firm)][:2]
-    for f in firms:
-        prod = getattr(f, "production", 0)
-        inv = getattr(f, "inventory", 0)
-        loan = getattr(f, "loan_principal", 0)
-        dp = getattr(f, "default_probability", 0)
-        if prod > 0 or loan > 0:
-            add_log(f"企业{f.unique_id}: 产出{prod:.1f} 库存{inv:.1f} 负债{loan:.1f} 违约风险{dp:.1%}")
-    
-    households = [a for a in model.agents if isinstance(a, Household)][:2]
-    for h in households:
-        employed = "就业" if getattr(h, "employed", False) else "失业"
-        cash = getattr(h, "cash", 0)
-        add_log(f"家庭{h.unique_id}: {employed} 现金{cash:.1f}")
-    
-    banks = [a for a in model.agents if isinstance(a, Bank)]
-    for b in banks:
-        reserves = getattr(b, "reserves", 0)
-        bad = getattr(b, "bad_debts", 0)
-        add_log(f"银行{b.unique_id}: 储备{reserves:.1f} 坏账{bad:.1f}")
-    
-    # 风险告警
-    vol = getattr(model, "stock_volatility", 0)
-    defaults = getattr(model, "default_count", 0)
-    bdr = getattr(model, "bank_bad_debt_rate", 0)
-    
-    alert_style = "color:#ef4444;font-weight:bold;" if defaults > 0 else "color:#e2e8f0;"
-    
-    html = (
-        f"<div style='background:#0f172a;border-radius:8px;padding:12px;font-family:Consolas,monospace;font-size:12px;max-height:300px;overflow-y:auto;'>"
-        f"<div style='margin-bottom:8px;color:#94a3b8;'>🐛 调试日志 (实时采样)</div>"
-    )
-    for line in log_lines.value:
-        html += f"<div style='margin:2px 0;'>{line}</div>"
-    
-    # 风险告警区
-    html += f"<div style='border-top:1px solid #334155;margin-top:8px;padding-top:8px;{alert_style}'>"
-    if vol > 0.3:
-        html += f"⚠️ 股价波动剧烈: {vol:.3f}<br>"
-    if defaults > 0:
-        html += f"🚨 企业违约: {defaults}家<br>"
-    if bdr > 0.1:
-        html += f"🏦 银行坏账率警告: {bdr:.1%}<br>"
-    if defaults == 0 and vol <= 0.3 and bdr <= 0.1:
-        html += "✅ 系统运行正常"
-    html += "</div></div>"
-    
-    solara.HTML(tag="div", unsafe_innerHTML=html)
-
-
-@solara.component
-def AgentDetailPanel(model: Model):
-    """Agent详情面板"""
+def AgentDetailPanel():
+    """Agent 详情面板"""
     selected_type = solara.use_reactive("家庭")
     agent_types = ["家庭", "企业", "交易者", "银行"]
-    
     type_map = {"家庭": Household, "企业": Firm, "交易者": Trader, "银行": Bank}
-    
-    agents = [a for a in model.agents if isinstance(a, type_map.get(selected_type.value, Household))]
-    
-    with solara.Card(f"👤 Agent详情 ({selected_type.value}: {len(agents)}个)", margin=0):
+
+    agents = []
+    m = model_ref.value
+    if m is not None:
+        agents = [a for a in m.agents if isinstance(a, type_map.get(selected_type.value, Household))]
+
+    with solara.Card(f"👤 Agent详情 ({len(agents)}个)", margin=0):
         solara.Select(
             label="选择类型",
             value=selected_type,
             values=agent_types,
         )
-        
+
         if agents:
-            # 显示前5个agent的关键属性
-            for i, agent in enumerate(agents[:5]):
-                props = {
-                    "cash": getattr(agent, "cash", "N/A"),
-                    "wealth": getattr(agent, "wealth", "N/A"),
-                    "employed": getattr(agent, "employed", "N/A"),
-                }
-                solara.Text(f"#{i+1} 现金:{props['cash']} 财富:{props['wealth']} 就业:{props['employed']}")
+            items = []
+            for a in agents[:5]:
+                uid = a.unique_id
+                cash = getattr(a, "cash", 0)
+                wealth = getattr(a, "wealth", 0)
+                if isinstance(a, Household):
+                    employed = "✅就业" if getattr(a, "employed", False) else "❌失业"
+                    salary = getattr(a, "salary", 0)
+                    shares = getattr(a, "shares_owned", 0)
+                    items.append(f"#{uid} 现金:{cash:.0f} 财富:{wealth:.0f} {employed} 工资:{salary:.1f} 持股:{shares}")
+                elif isinstance(a, Firm):
+                    prod = getattr(a, "production", 0)
+                    inv = getattr(a, "inventory", 0)
+                    emp = getattr(a, "employees", 0)
+                    dp = getattr(a, "default_probability", 0)
+                    items.append(f"#{uid} 产出:{prod:.1f} 库存:{inv:.1f} 员工:{emp} 违约风险:{dp:.0%}")
+                elif isinstance(a, Trader):
+                    shares = getattr(a, "shares", 0)
+                    mom = getattr(a, "momentum", 0)
+                    items.append(f"#{uid} 现金:{cash:.0f} 持股:{shares} 动量:{mom:.3f}")
+                elif isinstance(a, Bank):
+                    reserves = getattr(a, "reserves", 0)
+                    bad = getattr(a, "bad_debts", 0)
+                    items.append(f"#{uid} 储备:{reserves:.0f} 坏账:{bad:.1f}")
+            
+            for item in items:
+                solara.Text(item, style="font-size:12px;color:#94a3b8;font-family:Consolas,monospace;")
 
 
 @solara.component
-def PerformancePanel(model: Model):
-    """性能监控面板"""
-    import time
-    import psutil
-    import os
-    
-    process = psutil.Process(os.getpid())
-    mem_mb = process.memory_info().rss / 1024 / 1024
-    n_agents = len(list(model.agents))
-    
-    with solara.Card("⚡ 性能监控", margin=0):
-        with solara.Row():
-            solara.Text(f"Agent数: {n_agents}")
-            solara.Text(f"内存: {mem_mb:.1f}MB")
-        
-        if n_agents > 80:
-            solara.Warning("Agent数量较多，模拟可能变慢")
+def ChartPanel():
+    """图表面板：使用 matplotlib 渲染"""
+    m = model_ref.value
+    if m is None:
+        solara.Text("模型加载中...")
+        return
+
+    chart_data = get_chart_data(m)
+    colors = ["#3b82f6", "#22c55e", "#f97316", "#a855f7", "#ef4444",
+              "#06b6d4", "#84cc16", "#f59e0b", "#ec4899", "#6366f1"]
+
+    with solara.Grid(columns=3):
+        for i, (key, label) in enumerate(CHART_CONFIG):
+            data = chart_data.get(key, [])
+            if not data:
+                solara.FigureMatplotlib(
+                    render_matplotlib_figure([0], label, colors[i % len(colors)])
+                )
+            else:
+                solara.FigureMatplotlib(
+                    render_matplotlib_figure(data, label, colors[i % len(colors)])
+                )
+
+
+@solara.component
+def ExportPanel():
+    """数据导出面板"""
+    csv_bytes = solara.use_reactive(b"")
+    filename = solara.use_reactive("econ_data.csv")
+
+    def on_export():
+        m = model_ref.value
+        if m is None or not hasattr(m, "datacollector"):
+            return
+        df = m.datacollector.get_model_vars_dataframe()
+        buf = io.StringIO()
+        df.to_csv(buf)
+        csv_bytes.set(buf.getvalue().encode("utf-8"))
+        filename.set(f"econ_cycle{m.cycle}.csv")
+        logger.info("导出 %d 字节", len(csv_bytes.value))
+
+    with solara.Card("📥 数据导出", margin=0):
+        solara.Button("导出CSV", on_click=on_export, color="primary", icon_name="mdi-download")
+        if csv_bytes.value:
+            solara.FileDownload(
+                data=csv_bytes.value,
+                filename=filename.value,
+                label="📥 点击下载 CSV",
+            )
+
+
+@solara.component
+def DebugLogPanel():
+    """实时调试日志"""
+    m = model_ref.value
+    if m is None:
+        return
+
+    firms = [a for a in m.agents if isinstance(a, Firm)][:3]
+    households = [a for a in m.agents if isinstance(a, Household)][:3]
+    banks = [a for a in m.agents if isinstance(a, Bank)]
+
+    vol = m.stock_volatility
+    defaults = m.default_count
+    bdr = m.bank_bad_debt_rate
+
+    lines = []
+    for f in firms:
+        prod = getattr(f, "production", 0)
+        inv = getattr(f, "inventory", 0)
+        loan = getattr(f, "loan_principal", 0)
+        dp = getattr(f, "default_probability", 0)
+        lines.append(f"企业{f.unique_id}: 产出{prod:.1f} 库存{inv:.1f} 负债{loan:.1f} 违约{dp:.0%}")
+
+    for h in households:
+        emp = "就业" if getattr(h, "employed", False) else "失业"
+        cash = getattr(h, "cash", 0)
+        shares = getattr(h, "shares_owned", 0)
+        lines.append(f"家庭{h.unique_id}: {emp} 现金{cash:.0f} 持股{shares}")
+
+    for b in banks:
+        reserves = getattr(b, "reserves", 0)
+        bad = getattr(b, "bad_debts", 0)
+        lines.append(f"银行{b.unique_id}: 储备{reserves:.0f} 坏账{bad:.1f}")
+
+    alerts = []
+    if vol > 0.3:
+        alerts.append(f"⚠️ 股价波动: {vol:.3f}")
+    if defaults > 0:
+        alerts.append(f"🚨 企业违约: {defaults}家")
+    if bdr > 0.1:
+        alerts.append(f"🏦 坏账率: {bdr:.1%}")
+
+    alert_color = "#ef4444" if alerts else "#4ade80"
+    alert_text = " | ".join(alerts) if alerts else "✅ 系统正常"
+
+    html = (
+        "<div style='background:#0f172a;border-radius:8px;padding:12px;"
+        "font-family:Consolas,monospace;font-size:11px;max-height:280px;overflow-y:auto;'>"
+        f"<div style='margin-bottom:6px;color:#94a3b8;'>🐛 Agent 采样 (每轮刷新)</div>"
+    )
+    for line in lines:
+        html += f"<div style='margin:2px 0;color:#e2e8f0;'>{line}</div>"
+    html += (
+        f"<div style='border-top:1px solid #334155;margin-top:8px;padding-top:8px;"
+        f"color:{alert_color};font-weight:bold;'>{alert_text}</div>"
+        "</div>"
+    )
+    solara.HTML(tag="div", unsafe_innerHTML=html)
 
 
 # ─────────────────────────────────────────────
-# 初始化
+# 主页面布局
 # ─────────────────────────────────────────────
 
-logger.info("创建图表组件...")
-chart_components = create_charts(CHART_CONFIG)
+@solara.component
+def Page():
+    """主页面"""
+    # 初始化参数
+    initial_params = {
+        "n_households": 20,
+        "n_firms": 10,
+        "n_traders": 20,
+        "tax_rate": 0.15,
+        "base_interest_rate": 0.05,
+        "min_wage": 7.0,
+        "productivity": 1.0,
+        "subsidy": 0.0,
+    }
 
-logger.info("构建模型参数...")
-model_params = build_model_params()
+    # 顶部标题 + 控制栏
+    solara.Markdown("# 🏛️ Mesa 经济沙盘")
+    solara.Markdown("**消费者 × 企业 × 银行 × 交易者 — 四大市场实时仿真**")
+    ControlBar(initial_params)
 
-logger.info("初始化模型...")
-try:
-    model = EconomyModel()
-except Exception as e:
-    logger.critical("模型初始化失败: %s", e)
-    raise
+    # 参数 + 政策
+    with solara.Grid(columns=2):
+        ParamSliders()
+        PolicyPanel()
 
-logger.info("启动 SolaraViz: http://127.0.0.1:8521 ...")
-page = SolaraViz(
-    model,
-    renderer=None,
-    components=[
-        MacroStats,
-        PolicyPanel,
-        ScenarioPanel,
-        ExportPanel,
-        AgentDetailPanel,
-        PerformancePanel,
-        *chart_components,
-    ],
-    model_params=model_params,
-    name=APP_NAME,
-    play_interval=PLAY_INTERVAL_MS,
-)
+    # 场景 + Agent详情 + 导出
+    with solara.Grid(columns=3):
+        ScenarioPanel()
+        AgentDetailPanel()
+        ExportPanel()
 
-page
+    # 宏观快照
+    MacroStatsPanel()
+
+    # 调试日志
+    DebugLogPanel()
+
+    # 图表
+    solara.Markdown("### 📈 经济指标时序图")
+    ChartPanel()
+
+
+# ─────────────────────────────────────────────
+# 启动
+# ─────────────────────────────────────────────
+
+logger.info("启动 Mesa 经济沙盘 Solara 应用...")
+page = Page()
