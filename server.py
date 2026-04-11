@@ -60,6 +60,9 @@ CHART_CONFIG = {
     "gini": "基尼系数",
     "buy_orders": "买入订单",
     "loans": "贷款余额",
+    "stock_volatility": "股价波动率",
+    "bad_debt_rate": "银行坏账率",
+    "default_count": "违约企业数",
 }
 
 # 场景预设
@@ -136,6 +139,10 @@ def build_macro_stats(model: Model) -> dict[str, Any]:
         "物价": f"{getattr(model, 'price_index', 0):.2f}",
         "财政收入": f"{getattr(model, 'govt_revenue', 0):.1f}",
         "贷款余额": f"{getattr(model, 'total_loans_outstanding', 0):.1f}",
+        # 金融风险
+        "波动率": f"{getattr(model, 'stock_volatility', 0):.3f}",
+        "违约数": getattr(model, "default_count", 0),
+        "坏账率": f"{getattr(model, 'bank_bad_debt_rate', 0):.1%}",
     }
 
 
@@ -213,6 +220,11 @@ def MacroStats(model: Model):
         f"    <div>🏛️ 财政: {stats['财政收入']}</div>"
         f"    <div>💳 贷款: {stats['贷款余额']}</div>"
         f"  </div>"
+        f"  <div style='border-top:1px solid #334155;margin-top:8px;padding-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;font-size:13px;'>"
+        f"    <div>📊 波动率: {stats['波动率']}</div>"
+        f"    <div>⚠️ 违约数: {stats['违约数']}</div>"
+        f"    <div>🏦 坏账率: {stats['坏账率']}</div>"
+        f"  </div>"
         f"</div>"
     )
     solara.HTML(tag="div", unsafe_innerHTML=html)
@@ -283,8 +295,8 @@ def ScenarioPanel(model: Model):
 def ExportPanel(model: Model):
     """数据导出面板"""
     
-    def get_csv_data():
-        """生成CSV数据"""
+    def get_csv_bytes():
+        """生成CSV二进制数据"""
         df_model = model.datacollector.get_model_vars_dataframe()
         df_agents = model.datacollector.get_agent_vars_dataframe()
         
@@ -294,30 +306,90 @@ def ExportPanel(model: Model):
         buffer.write("\n# Agent级数据\n")
         df_agents.to_csv(buffer)
         
-        return buffer.getvalue()
+        return buffer.getvalue().encode("utf-8")
     
-    csv_data = solara.use_reactive("")
+    csv_bytes, set_csv_bytes = solara.use_state(lambda: b"")
+    filename = f"econ_cycle{getattr(model, 'cycle', 0)}.csv"
     
     def on_export():
-        try:
-            csv_data.set(get_csv_data())
-            logger.info("导出成功: %d 字节", len(csv_data.value))
-        except Exception as e:
-            logger.error("导出失败: %s", e)
+        set_csv_bytes(get_csv_bytes())
+        logger.info("导出成功，%d 字节", len(csv_bytes))
     
     with solara.Card("📥 数据导出", margin=0):
         with solara.Row():
             solara.Button("导出CSV", on_click=on_export, color="primary", icon_name="mdi-download")
             solara.Text(f"周期: {getattr(model, 'cycle', 0)}")
         
-        if csv_data.value:
-            # 提供下载链接
-            b64 = base64.b64encode(csv_data.value.encode()).decode()
-            href = f"data:text/csv;base64,{b64}"
-            solara.HTML(
-                tag="a",
-                unsafe_innerHTML=f'<a href="{href}" download="econ_data.csv" style="color:#3b82f6;">📥 点击下载 CSV</a>',
+        if csv_bytes:
+            solara.FileDownload(
+                data=csv_bytes,
+                filename=filename,
+                label="📥 点击下载 CSV",
             )
+
+
+@solara.component
+def DebugLogPanel(model: Model):
+    """实时调试日志面板"""
+    log_lines = solara.use_reactive(list[str])
+    max_lines = 50
+    
+    def add_log(msg: str):
+        lines = log_lines.value
+        lines.append(msg)
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        log_lines.set(lines)
+    
+    # 采样部分 Agent 行为
+    firms = [a for a in model.agents if isinstance(a, Firm)][:2]
+    for f in firms:
+        prod = getattr(f, "production", 0)
+        inv = getattr(f, "inventory", 0)
+        loan = getattr(f, "loan_principal", 0)
+        dp = getattr(f, "default_probability", 0)
+        if prod > 0 or loan > 0:
+            add_log(f"企业{f.unique_id}: 产出{prod:.1f} 库存{inv:.1f} 负债{loan:.1f} 违约风险{dp:.1%}")
+    
+    households = [a for a in model.agents if isinstance(a, Household)][:2]
+    for h in households:
+        employed = "就业" if getattr(h, "employed", False) else "失业"
+        cash = getattr(h, "cash", 0)
+        add_log(f"家庭{h.unique_id}: {employed} 现金{cash:.1f}")
+    
+    banks = [a for a in model.agents if isinstance(a, Bank)]
+    for b in banks:
+        reserves = getattr(b, "reserves", 0)
+        bad = getattr(b, "bad_debts", 0)
+        add_log(f"银行{b.unique_id}: 储备{reserves:.1f} 坏账{bad:.1f}")
+    
+    # 风险告警
+    vol = getattr(model, "stock_volatility", 0)
+    defaults = getattr(model, "default_count", 0)
+    bdr = getattr(model, "bank_bad_debt_rate", 0)
+    
+    alert_style = "color:#ef4444;font-weight:bold;" if defaults > 0 else "color:#e2e8f0;"
+    
+    html = (
+        f"<div style='background:#0f172a;border-radius:8px;padding:12px;font-family:Consolas,monospace;font-size:12px;max-height:300px;overflow-y:auto;'>"
+        f"<div style='margin-bottom:8px;color:#94a3b8;'>🐛 调试日志 (实时采样)</div>"
+    )
+    for line in log_lines.value:
+        html += f"<div style='margin:2px 0;'>{line}</div>"
+    
+    # 风险告警区
+    html += f"<div style='border-top:1px solid #334155;margin-top:8px;padding-top:8px;{alert_style}'>"
+    if vol > 0.3:
+        html += f"⚠️ 股价波动剧烈: {vol:.3f}<br>"
+    if defaults > 0:
+        html += f"🚨 企业违约: {defaults}家<br>"
+    if bdr > 0.1:
+        html += f"🏦 银行坏账率警告: {bdr:.1%}<br>"
+    if defaults == 0 and vol <= 0.3 and bdr <= 0.1:
+        html += "✅ 系统运行正常"
+    html += "</div></div>"
+    
+    solara.HTML(tag="div", unsafe_innerHTML=html)
 
 
 @solara.component

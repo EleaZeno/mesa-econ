@@ -1,11 +1,14 @@
 """
-Mesa Economic Sandbox - Core Model (Mesa 3.x compatible)
+Mesa 经济沙盘 - 核心模型 (Mesa 3.x)
 全面经济系统沙盒：消费者、企业、银行、交易员 × 商品/劳动力/信贷/股票四大市场
 """
 
+import logging
 import numpy as np
 from mesa import Agent, Model
 from mesa.datacollection import DataCollector
+
+logger = logging.getLogger("econ")
 
 
 # ─────────────────────────────────────────────
@@ -91,6 +94,7 @@ class Firm(Agent):
         self.loan_principal = 0.0
         self.wealth = self.cash
         self.dividend_per_share = 0.0
+        self.default_probability = 0.0  # 违约概率（0~1）
 
     def step(self):
         m = self.model
@@ -129,15 +133,20 @@ class Firm(Agent):
             self.dividend_per_share = profit / 50
             m.total_dividends += profit
 
-        # 5. 借贷（如果现金不足）
+        # 5. 计算违约概率（与现金/负债比挂钩）
+        total_debt = self.loan_principal + 10
+        self.default_probability = max(0.0, 1.0 - self.cash / total_debt)
+
+        # 6. 借贷（如果现金不足）
         wage_bill = self.employees * self.wage_offer
         if self.cash < wage_bill * 0.5 and self.loan_principal < 500:
             loan = min(200.0, wage_bill)
             self.cash += loan
             self.loan_principal += loan
             m.total_loans_outstanding += loan
+            logger.debug("企业%d贷款%.1f，现金%.1f，负债%.1f", self.unique_id, loan, self.cash, self.loan_principal)
 
-        # 6. 偿还贷款
+        # 7. 偿还贷款（可能违约）
         if self.loan_principal > 0:
             rate = m.base_interest_rate
             interest = self.loan_principal * rate * 0.1
@@ -145,6 +154,12 @@ class Firm(Agent):
             if self.cash > repayment:
                 self.cash -= repayment
                 self.loan_principal -= max(0, repayment - interest)
+            # 违约判定
+            elif self.random.random() < self.default_probability:
+                logger.warning("企业%d违约！现金%.1f，负债%.1f，违约概率%.2f",
+                              self.unique_id, self.cash, self.loan_principal, self.default_probability)
+                m.total_loans_outstanding -= self.loan_principal
+                self.loan_principal = 0.0
 
         # 7. 调整工资
         if self.inventory > 10:
@@ -156,13 +171,14 @@ class Firm(Agent):
 
 
 class Bank(Agent):
-    """银行：吸收存款、放贷"""
+    """银行：吸收存款、放贷、追踪坏账"""
 
     def __init__(self, model):
         super().__init__(model)
         self.reserves = 1000.0
         self.deposits = 0.0
         self.total_loans = 0.0
+        self.bad_debts = 0.0  # 坏账
         self.wealth = self.reserves
 
     def step(self):
@@ -188,6 +204,12 @@ class Bank(Agent):
                         m.total_loans_outstanding += 20.0
                     self.reserves -= 20.0
                     self.total_loans += 20.0
+
+        # 计算坏账率
+        firms = [a for a in m.agents if isinstance(a, Firm)]
+        if firms:
+            default_probs = [f.default_probability for f in firms]
+            self.bad_debts = sum(p * 20 for p in default_probs)
 
         self.wealth = self.reserves + self.total_loans * 0.5
 
@@ -312,6 +334,11 @@ class EconomyModel(Model):
         self.unemployment = 0.0
         self.gini = 0.0
 
+        # 金融风险指标
+        self.stock_volatility = 0.0   # 股价波动率（日收益率标准差）
+        self.default_count = 0        # 本轮违约事件计数
+        self.bank_bad_debt_rate = 0.0  # 银行坏账率
+
         # 创建代理人
         for _ in range(n_households):
             self.agents.add(Household(self))
@@ -337,6 +364,9 @@ class EconomyModel(Model):
                 "sell_orders": lambda m: m.sell_orders,
                 "gov_revenue": lambda m: round(m.govt_revenue, 1),
                 "loans": lambda m: round(m.total_loans_outstanding, 1),
+                "stock_volatility": lambda m: round(getattr(m, "stock_volatility", 0.0), 3),
+                "default_count": lambda m: getattr(m, "default_count", 0),
+                "bad_debt_rate": lambda m: round(getattr(m, "bank_bad_debt_rate", 0.0), 3),
             },
             agent_reporters={
                 "cash": lambda a: getattr(a, "cash", None),
@@ -350,6 +380,7 @@ class EconomyModel(Model):
         self.sell_orders = 0
         self.govt_revenue = 0.0
         self.total_dividends = 0.0
+        self.default_count = 0  # 重置违约计数
 
         # 所有代理人决策（Mesa 3.x：手动遍历 AgentSet）
         for agent in self.agents:
@@ -372,6 +403,11 @@ class EconomyModel(Model):
         self.stock_price += self.random.uniform(-0.5, 0.5)
         self.stock_price = max(1.0, self.stock_price)
 
+        # 股市波动率（收益率标准差近似）
+        if self.prev_stock_price > 0:
+            daily_return = (self.stock_price - self.prev_stock_price) / self.prev_stock_price
+            self.stock_volatility = abs(daily_return) * 10  # 放大显示
+
         # 物价指数
         inflation_pressure = (self.gdp - 1000) / 1000 * 0.1
         self.price_index = max(1.0, self.price_index + self.random.uniform(-0.5, 0.5) + inflation_pressure)
@@ -380,6 +416,16 @@ class EconomyModel(Model):
         self.gdp = compute_gdp(self)
         self.unemployment = compute_unemployment(self)
         self.gini = compute_gini(self)
+
+        # 金融风险指标
+        firms = [a for a in self.agents if isinstance(a, Firm)]
+        banks = [a for a in self.agents if isinstance(a, Bank)]
+        if firms:
+            self.default_count = sum(1 for f in firms if f.default_probability > 0.5)
+        if banks:
+            total_bad = sum(b.bad_debts for b in banks)
+            total_loans = sum(b.total_loans for b in banks) + 1e-6
+            self.bank_bad_debt_rate = total_bad / total_loans
 
         self.cycle += 1
         self.datacollector.collect(self)
