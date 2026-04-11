@@ -634,3 +634,4 @@ def Page():
             MacroStatsPanel()
             AgentDetailPanel()
             ChartPanel()
+
