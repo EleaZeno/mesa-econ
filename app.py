@@ -1,5 +1,5 @@
-import io, threading
-from flask import Flask, request, Response
+import io, json, threading
+from flask import Flask, request, Response, jsonify
 from model import EconomyModel
 
 app = Flask(__name__)
@@ -259,19 +259,17 @@ def _page():
     p = []
     p.append("<!DOCTYPE html><html lang=zh><head><meta charset=utf-8>")
     p.append('<meta name=viewport content="width=device-width,initial-scale=1">')
-    if _run:
-        p.append('<meta http-equiv="refresh" content="1">')
     p.append("<title>经济沙盘 v3.3</title>")
     p.append("<style>" + CSS + "</style></head><body>")
-    p.append('<h1>经济沙盘 <span style="color:#3b82f6">v3.3</span> <span class=cyc>第 ' + str(cyc) + ' 轮</span></h1>')
+    p.append('<h1>经济沙盘 <span style="color:#3b82f6">v3.3</span> <span class=cyc id=cycle>第 ' + str(cyc) + ' 轮</span></h1>')
     p.append('<div class="card ctrl">')
     p.append('<form method=get style=display:inline><button type=submit name=action value=play class="btn bg">播放</button></form>')
     p.append('<form method=get style=display:inline><button type=submit name=action value=pause class="btn bo">暂停</button></form>')
     p.append('<form method=get style=display:inline><button type=submit name=action value=step class="btn bb">单步</button></form>')
     p.append('<form method=get style=display:inline><button type=submit name=action value=reset class="btn br">重置</button></form>')
-    p.append('<span class=cyc style="margin-left:12px">第 ' + str(cyc) + ' 轮</span>')
+    p.append('<span class=cyc style="margin-left:12px" id=cycle2>第 ' + str(cyc) + ' 轮</span>')
     p.append('</div>')
-    p.append('<div class=card><h2>宏观指标</h2><div class=sc>')
+    p.append('<div class=card><h2>宏观指标</h2><div class=sc id=stats>')
     for k, lbl, typ, warn in stats:
         v = last.get(k, 0)
         cls = "dw" if warn else ""
@@ -289,7 +287,7 @@ def _page():
     for fk, fl in CHART_KEYS:
         cls = "ta" if fk == ck else "tb"
         p.append('<form method=get style=display:inline><button type=submit name=chart value=' + fk + ' class=' + cls + '>' + fl + '</button></form>')
-    p.append('</div>' + svg_html + '</div>')
+    p.append('</div><div id=chart>' + svg_html + '</div></div>')
     p.append('<div class=c2>')
     p.append('<div class=card><h2>经济参数</h2><form method=get>')
     for k, lbl, mn, mx, st_v in SLIDERS:
@@ -319,8 +317,84 @@ def _page():
     p.append('<div class=alist>' + (agents or '<div style="color:#94a3b8">无</div>') + '</div>')
     p.append('</div></div>')
     p.append('<div class=card><form method=get><button type=submit name=action value=export_csv class="btn bb">下载 CSV</button></form></div>')
+    # Live update script - only polls when simulation is running
+    p.append('<script>')
+    p.append('var _running=' + ('true' if _run else 'false') + ';')
+    p.append('var _chart="' + ck + '";')
+    p.append('function poll(){')
+    p.append('  if(!_running)return;')
+    p.append('  fetch("/api/live?chart="+_chart)')
+    p.append('    .then(function(r){return r.json()})')
+    p.append('    .then(function(d){')
+    p.append('      if(d.cycle!==undefined){')
+    p.append('        var e1=document.getElementById("cycle");')
+    p.append('        var e2=document.getElementById("cycle2");')
+    p.append('        if(e1)e1.textContent="\\u7B2C "+d.cycle+" \\u8F6E";')
+    p.append('        if(e2)e2.textContent="\\u7B2C "+d.cycle+" \\u8F6E";')
+    p.append('      }')
+    p.append('      if(d.svg){')
+    p.append('        var ch=document.getElementById("chart");')
+    p.append('        if(ch)ch.innerHTML=d.svg;')
+    p.append('      }')
+    p.append('      if(d.stats){')
+    p.append('        var st=document.getElementById("stats");')
+    p.append('        if(st){')
+    p.append('          var s=d.stats;')
+    p.append('          var items=st.querySelectorAll(".sv");')
+    p.append('          var keys=["gdp","unemp","gini","stock","price","vol","bdr","loans","rev","bankrupt","rate","emp"];')
+    p.append('          var types=["int","pct","dec3","dec1","dec1","dec3","dec1","int","int","int","pct","int"];')
+    p.append('          for(var i=0;i<items.length&&i<keys.length;i++){')
+    p.append('            var v=s[keys[i]];')
+    p.append('            if(v===undefined)continue;')
+    p.append('            if(types[i]==="int")items[i].textContent=v.toLocaleString();')
+    p.append('            else if(types[i]==="pct")items[i].textContent=v.toFixed(1)+"%";')
+    p.append('            else if(types[i]==="dec1")items[i].textContent=v.toFixed(1);')
+    p.append('            else items[i].textContent=v.toFixed(3);')
+    p.append('          }')
+    p.append('        }')
+    p.append('      }')
+    p.append('      _running=d.running;')
+    p.append('      if(_running)setTimeout(poll,500);')
+    p.append('    })')
+    p.append('    .catch(function(){if(_running)setTimeout(poll,2000)});')
+    p.append('}')
+    p.append('if(_running)setTimeout(poll,300);')
+    p.append('</script>')
     p.append('</body></html>')
     return "\n".join(p)
+
+
+@app.route("/api/live")
+def api_live():
+    with _lock:
+        if _md is None:
+            return jsonify({"cycle": 0})
+        cyc = _md.cycle
+        try:
+            emp = sum(1 for h in _md.households if h.employed)
+            nh = len(_md.households)
+            last = {
+                "gdp": round(_md.gdp),
+                "unemp": round(_md.unemployment * 100, 1),
+                "price": round(getattr(_md, "price_index", 100.0), 1),
+                "stock": round(_md.stock_price, 1),
+                "vol": round(getattr(_md, "stock_volatility", 0.0), 3),
+                "bdr": round(getattr(_md, "bank_bad_debt_rate", 0.0) * 100, 1),
+                "loans": round(_md.total_loans_outstanding),
+                "rev": round(_md.govt_revenue),
+                "bankrupt": _md.bankrupt_count,
+                "gini": round(_md.gini, 3),
+                "emp": emp, "nh": nh,
+                "rate": round(emp / nh * 100 if nh else 0, 1),
+            }
+        except Exception:
+            last = {}
+    with _hl:
+        h = list(_hist)
+    ck = request.args.get("chart", "gdp")
+    vals = [r.get(ck, 0) for r in h]
+    svg_html = _svg(vals, CHART_CLR.get(ck, "#3b82f6"))
+    return jsonify({"cycle": cyc, "stats": last, "svg": svg_html, "running": _run})
 
 
 @app.route("/")
