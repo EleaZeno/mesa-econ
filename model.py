@@ -50,8 +50,25 @@ logger = logging.getLogger("econ")
 
 class City(Enum):
     """城市标签（双城竞争）"""
-    CITY_A = "city_a"   # 城市 A
-    CITY_B = "city_b"   # 城市 B
+    CITY_A = "city_a"   # 城市 A（工业导向）
+    CITY_B = "city_b"   # 城市 B（科技导向）
+
+
+# ── 城市级参数（Phase 3：差异化政策）────────────────────────────
+CITY_PARAMS = {
+    City.CITY_A: {
+        "corporate_tax_rate": 0.12,    # 企业税率（低税吸引企业）
+        "min_wage": 7.5,               # 最低工资
+        "subsidy_rate": 0.10,          # 补贴率
+        "infrastructure": 0.8,         # 基建水平（影响生产效率）
+    },
+    City.CITY_B: {
+        "corporate_tax_rate": 0.18,    # 企业税率（高税高福利）
+        "min_wage": 6.8,               # 最低工资（劳动力便宜）
+        "subsidy_rate": 0.05,          # 补贴率
+        "infrastructure": 1.0,         # 基建水平（科技发达）
+    },
+}
 
 
 class Industry(Enum):
@@ -485,25 +502,29 @@ class Household(Agent):
         self.wealth = self.cash - self.loan_principal + stock_value
 
     def _consider_migration(self) -> None:
-        """跨城迁移决策（Phase 2）"""
+        """跨城迁移决策（Phase 2 + 3）"""
         # 每轮有 3% 概率考虑迁移
         if self.random.random() > 0.03:
             return
         # 迁移成本：至少需要 50 现金
         if self.cash < 50:
             return
-        # 计算当前城市和另一城市的失业率差
         my_city = self.city
         other_city = City.CITY_B if my_city == City.CITY_A else City.CITY_A
+        # 失业率差
         my_unemp = self.model.city_a_unemp if my_city == City.CITY_A else self.model.city_b_unemp
         other_unemp = self.model.city_b_unemp if my_city == City.CITY_A else self.model.city_a_unemp
-        # 另一城市失业率低 10% 以上 → 迁移概率提升
         unemp_diff = my_unemp - other_unemp
-        if unemp_diff > 0.10 and self.random.random() < 0.5:
-            # 执行迁移
+        # 最低工资差（Phase 3）
+        my_min_wage = self.model.city_a_min_wage if my_city == City.CITY_A else self.model.city_b_min_wage
+        other_min_wage = self.model.city_b_min_wage if my_city == City.CITY_A else self.model.city_a_min_wage
+        wage_diff = other_min_wage - my_min_wage
+        # 综合迁移评分
+        migrate_score = unemp_diff * 3 + wage_diff * 0.5
+        if migrate_score > 0.15 and self.random.random() < 0.5:
             self.city = other_city
             self.cash -= 50  # 迁移成本
-            self.employed = False  # 摩擦性失业（1 轮）
+            self.employed = False  # 摩擦性失业
             self.employer = None
 
     def update_credit_score(self) -> None:
@@ -900,19 +921,26 @@ class Firm(Agent):
         self._consider_migration()
 
     def _consider_migration(self) -> None:
-        """企业跨城迁移（Phase 2）"""
+        """企业跨城迁移（Phase 2 + 3）"""
         # 每轮 2% 概率考虑迁移
         if self.random.random() > 0.02:
             return
         # 迁移成本：需要至少 200 现金
         if self.cash < 200:
             return
-        # 当前城市失业率高 → 本地劳动力充足，不迁移
-        my_unemp = self.model.city_a_unemp if self.city == City.CITY_A else self.model.city_b_unemp
-        other_unemp = self.model.city_b_unemp if self.city == City.CITY_A else self.model.city_a_unemp
-        # 另一城市失业率高 → 劳动力便宜，吸引迁移
-        if other_unemp - my_unemp > 0.05 and self.random.random() < 0.3:
-            other_city = City.CITY_B if self.city == City.CITY_A else City.CITY_A
+        my_city = self.city
+        other_city = City.CITY_B if my_city == City.CITY_A else City.CITY_A
+        # 税率差（Phase 3）
+        my_tax = self.model.city_a_tax if my_city == City.CITY_A else self.model.city_b_tax
+        other_tax = self.model.city_b_tax if my_city == City.CITY_A else self.model.city_a_tax
+        tax_diff = my_tax - other_tax  # 正值：当前税率高，想迁走
+        # 失业率差（劳动力成本）
+        my_unemp = self.model.city_a_unemp if my_city == City.CITY_A else self.model.city_b_unemp
+        other_unemp = self.model.city_b_unemp if my_city == City.CITY_A else self.model.city_a_unemp
+        labor_diff = other_unemp - my_unemp  # 正值：另一城市劳动力更便宜
+        # 综合迁移概率
+        migrate_score = tax_diff * 5 + labor_diff * 2
+        if migrate_score > 0.05 and self.random.random() < 0.3:
             self.city = other_city
             self.cash -= 200  # 迁移成本
             # 20% 员工离职
@@ -1314,6 +1342,16 @@ class EconomyModel(Model):
         self.city_b_firms: int = 0
         self.city_b_unemp: float = 0.0
         self.city_b_gdp: float = 0.0
+
+        # ── 城市级参数（Phase 3：差异化政策）──────────────────
+        self.city_a_tax = CITY_PARAMS[City.CITY_A]["corporate_tax_rate"]
+        self.city_a_min_wage = CITY_PARAMS[City.CITY_A]["min_wage"]
+        self.city_a_subsidy = CITY_PARAMS[City.CITY_A]["subsidy_rate"]
+        self.city_a_infra = CITY_PARAMS[City.CITY_A]["infrastructure"]
+        self.city_b_tax = CITY_PARAMS[City.CITY_B]["corporate_tax_rate"]
+        self.city_b_min_wage = CITY_PARAMS[City.CITY_B]["min_wage"]
+        self.city_b_subsidy = CITY_PARAMS[City.CITY_B]["subsidy_rate"]
+        self.city_b_infra = CITY_PARAMS[City.CITY_B]["infrastructure"]
 
         # ── 周期计数器 ─────────────────────────────────────
         self.cycle: int = 0

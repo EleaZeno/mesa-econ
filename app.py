@@ -340,6 +340,8 @@ def _page():
     p.append('<div style="font-size:11px;color:#64748b">企业：<span id=ca-firms>--</span></div>')
     p.append('<div style="font-size:11px;color:#64748b">失业率：<span id=ca-unemp>--</span>%</div>')
     p.append('<div style="font-size:11px;color:#64748b">GDP：<span id=ca-gdp>--</span></div>')
+    p.append('<div style="font-size:11px;color:#64748b">税率：<span id=ca-tax>--</span>%</div>')
+    p.append('<div style="font-size:11px;color:#64748b">最低工资：<span id=ca-mw>--</span></div>')
     p.append('</div>')
     # 城市 B
     p.append('<div style="flex:1;padding:10px;background:#f0fdf4;border-radius:8px;border-left:3px solid #22c55e">')
@@ -348,7 +350,16 @@ def _page():
     p.append('<div style="font-size:11px;color:#64748b">企业：<span id=cb-firms>--</span></div>')
     p.append('<div style="font-size:11px;color:#64748b">失业率：<span id=cb-unemp>--</span>%</div>')
     p.append('<div style="font-size:11px;color:#64748b">GDP：<span id=cb-gdp>--</span></div>')
+    p.append('<div style="font-size:11px;color:#64748b">税率：<span id=cb-tax>--</span>%</div>')
+    p.append('<div style="font-size:11px;color:#64748b">最低工资：<span id=cb-mw>--</span></div>')
     p.append('</div>')
+    p.append('</div>')
+    # 城市参数调节
+    p.append('<div style="display:flex;gap:12px;margin-top:8px">')
+    p.append('<div style="flex:1"><div style="font-size:10px;color:#64748b;margin-bottom:4px">城市A税率%</div>')
+    p.append('<input type=range id=sl-ct style=width:100% min=5 max=30 step=1 value=12 oninput="setCityParam(\'city_a\',\'tax\',this.value)"></div>')
+    p.append('<div style="flex:1"><div style="font-size:10px;color:#64748b;margin-bottom:4px">城市B税率%</div>')
+    p.append('<input type=range id=sl-ctb style=width:100% min=5 max=30 step=1 value=18 oninput="setCityParam(\'city_b\',\'tax\',this.value)"></div>')
     p.append('</div></div>')
 
     p.append('<div class=card><h2>图表</h2><div class=tabs id=chart-tabs>')
@@ -466,12 +477,22 @@ def _page():
     p.append('      document.getElementById("ca-firms").textContent=d.city_a.firms;')
     p.append('      document.getElementById("ca-unemp").textContent=d.city_a.unemp.toFixed(1);')
     p.append('      document.getElementById("ca-gdp").textContent=d.city_a.gdp;')
+    p.append('      document.getElementById("ca-tax").textContent=d.city_a.tax;')
+    p.append('      document.getElementById("ca-mw").textContent=d.city_a.min_wage;')
     p.append('      document.getElementById("cb-pop").textContent=d.city_b.pop;')
     p.append('      document.getElementById("cb-firms").textContent=d.city_b.firms;')
     p.append('      document.getElementById("cb-unemp").textContent=d.city_b.unemp.toFixed(1);')
     p.append('      document.getElementById("cb-gdp").textContent=d.city_b.gdp;')
+    p.append('      document.getElementById("cb-tax").textContent=d.city_b.tax;')
+    p.append('      document.getElementById("cb-mw").textContent=d.city_b.min_wage;')
     p.append('      if(_running)setTimeout(pollCities,1000);')
     p.append('    }).catch(function(){});')
+    p.append('}')
+    p.append('// ── 城市参数调节 ─────────────────────────────')
+    p.append('function setCityParam(city,key,val){')
+    p.append('  fetch("/api/city_param",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({city:city,key:key,value:parseFloat(val)/100})})')
+    p.append('    .then(function(r){return r.json()})')
+    p.append('    .then(function(d){if(!d.ok)console.error(d.error);});')
     p.append('}')
     p.append('// ── 手动触发冲击 ───────────────────────────')
     p.append('function triggerShock(name){')
@@ -666,15 +687,57 @@ def api_cities():
                 "firms": _md.city_a_firms,
                 "unemp": round(_md.city_a_unemp * 100, 1),
                 "gdp": round(_md.city_a_gdp),
+                "tax": round(_md.city_a_tax * 100, 1),
+                "min_wage": round(_md.city_a_min_wage, 1),
+                "subsidy": round(_md.city_a_subsidy * 100, 1),
             },
             "city_b": {
                 "pop": _md.city_b_pop,
                 "firms": _md.city_b_firms,
                 "unemp": round(_md.city_b_unemp * 100, 1),
                 "gdp": round(_md.city_b_gdp),
+                "tax": round(_md.city_b_tax * 100, 1),
+                "min_wage": round(_md.city_b_min_wage, 1),
+                "subsidy": round(_md.city_b_subsidy * 100, 1),
             },
             "cycle": _md.cycle,
         })
+
+
+@app.route("/api/city_param", methods=["POST"])
+def api_city_param():
+    """调节城市级参数（Phase 3）"""
+    data = request.get_json() or {}
+    city = data.get("city")  # "city_a" or "city_b"
+    key = data.get("key")    # tax / min_wage / subsidy / infra
+    value = data.get("value")
+    if not all([city, key, value is not None]):
+        return jsonify({"ok": False, "error": "参数不完整"})
+    with _lock:
+        if not _md:
+            return jsonify({"ok": False, "error": "模型未初始化"})
+        attr_map = {
+            "city_a": {
+                "tax": "city_a_tax",
+                "min_wage": "city_a_min_wage",
+                "subsidy": "city_a_subsidy",
+                "infra": "city_a_infra",
+            },
+            "city_b": {
+                "tax": "city_b_tax",
+                "min_wage": "city_b_min_wage",
+                "subsidy": "city_b_subsidy",
+                "infra": "city_b_infra",
+            },
+        }
+        attr = attr_map.get(city, {}).get(key)
+        if not attr:
+            return jsonify({"ok": False, "error": "无效参数名"})
+        try:
+            setattr(_md, attr, float(value))
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/")
