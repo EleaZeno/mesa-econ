@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>经济沙盘 v3.2</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;color:#1e293b;padding:16px;font-size:14px;max-width:960px;margin:0 auto}
+h1{font-size:20px;margin-bottom:12px;color:#0f172a}
+h2{font-size:12px;color:#64748b;margin-bottom:8px;font-weight:500;text-transform:uppercase;letter-spacing:.05em}
+h3{font-size:12px;color:#64748b;margin:10px 0 6px}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.btn{border:none;padding:7px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-family:inherit}
+.btn-pri{background:#3b82f6;color:#fff}.btn-pri:hover{background:#2563eb}
+.btn-grn{background:#16a34a;color:#fff}.btn-grn:hover{background:#15803d}
+.btn-org{background:#d97706;color:#fff}.btn-org:hover{background:#b45309}
+.btn-red{background:#dc2626;color:#fff}.btn-red:hover{background:#b91c1c}
+.btn-sm{padding:5px 10px;font-size:12px}
+.srow{margin-bottom:6px}
+.slbl{display:flex;justify-content:space-between;margin-bottom:2px;font-size:13px;color:#475569}
+.slbl b{color:#0f172a;font-weight:600}
+input[type=range]{width:100%;accent-color:#3b82f6;height:4px}
+select{width:100%;padding:6px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;font-size:13px;margin-bottom:8px;font-family:inherit}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(115px,1fr));gap:8px}
+.scard{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px}
+.slbl2{font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.04em}
+.sval{font-size:18px;font-weight:700;color:#0f172a;margin-top:2px}
+.sval.warn{color:#d97706}
+.sval.danger{color:#dc2626}
+.sval.good{color:#16a34a}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
+.tabbtn{background:#e2e8f0;color:#475569;border:none;padding:5px 11px;border-radius:5px;cursor:pointer;font-size:12px;font-family:inherit}
+.tabbtn.active{background:#3b82f6;color:#fff}
+.alist{max-height:170px;overflow-y:auto;font-size:12px;color:#475569;line-height:1.7;font-family:monospace}
+.aitem{background:#f8fafc;border-radius:4px;padding:2px 8px;margin-bottom:2px}
+.c2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:600px){.c2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>经济沙盘 <span style="color:#3b82f6">v3.2</span></h1>
+
+<div class="row">
+  <button class="btn btn-grn" id="btn-play" onclick="togglePlay()">播放</button>
+  <button class="btn btn-sm" onclick="step()">单步</button>
+  <button class="btn btn-red btn-sm" onclick="reset()">重置</button>
+  <span id="cycle" style="margin-left:auto;color:#94a3b8">第 0 轮</span>
+</div>
+
+<div class="card">
+  <h2>宏观指标</h2>
+  <div class="sgrid" id="stats"></div>
+</div>
+
+<div class="card">
+  <h2>图表</h2>
+  <div class="tabs" id="tabs"><button class="tabbtn active" onclick="showChart('gdp')">GDP</button><button class="tabbtn " onclick="showChart('unemployment')">失业率(%)</button><button class="tabbtn " onclick="showChart('gini')">基尼系数</button><button class="tabbtn " onclick="showChart('stock_price')">股价</button><button class="tabbtn " onclick="showChart('price_index')">物价指数</button><button class="tabbtn " onclick="showChart('chart_vol')">波动率</button><button class="tabbtn " onclick="showChart('chart_bdr')">坏账率(%)</button><button class="tabbtn " onclick="showChart('loans')">信贷总量</button><button class="tabbtn " onclick="showChart('chart_systemic')">系统风险</button></div>
+  <div id="chart">正在加载图表...</div>
+</div>
+
+<div class="c2">
+  <div class="card">
+    <h2>经济参数</h2>
+<div class="srow"><div class="slbl"><span>家庭数量</span><b id="v-n_households">20</b></div><input type="range" id="s-n_households" min="5" max="80" step="5" value="20" oninput="sl(this,'n_households')"></div><div class="srow"><div class="slbl"><span>企业数量</span><b id="v-n_firms">10</b></div><input type="range" id="s-n_firms" min="3" max="40" step="1" value="10" oninput="sl(this,'n_firms')"></div><div class="srow"><div class="slbl"><span>所得税率(%)</span><b id="v-tax_rate">15</b></div><input type="range" id="s-tax_rate" min="0" max="45" step="1" value="15" oninput="sl(this,'tax_rate')"></div><div class="srow"><div class="slbl"><span>基准利率(%)</span><b id="v-base_interest_rate">5</b></div><input type="range" id="s-base_interest_rate" min="0" max="25" step="0.5" value="5" oninput="sl(this,'base_interest_rate')"></div><div class="srow"><div class="slbl"><span>最低工资</span><b id="v-min_wage">7</b></div><input type="range" id="s-min_wage" min="0" max="20" step="0.5" value="7" oninput="sl(this,'min_wage')"></div><div class="srow"><div class="slbl"><span>全要素生产率</span><b id="v-productivity">1.0</b></div><input type="range" id="s-productivity" min="0.1" max="3" step="0.1" value="1.0" oninput="sl(this,'productivity')"></div><div class="srow"><div class="slbl"><span>政府购买</span><b id="v-gov_purchase">0</b></div><input type="range" id="s-gov_purchase" min="0" max="200" step="5" value="0" oninput="sl(this,'gov_purchase')"></div><div class="srow"><div class="slbl"><span>冲击概率(%)</span><b id="v-shock_prob">2</b></div><input type="range" id="s-shock_prob" min="0" max="20" step="1" value="2" oninput="sl(this,'shock_prob')"></div>
+  </div>
+  <div class="card">
+    <h2>预设场景</h2>
+    <select id="scen"><option value="">-- 选择场景 --</option><option value="经济危机">经济危机</option><option value="宽松政策">宽松政策</option><option value="高税高补贴">高税高补贴</option><option value="自由市场">自由市场</option><option value="政府刺激">政府刺激</option><option value="金融危机">金融危机</option></select>
+    <button class="btn btn-pri btn-sm" onclick="applyScen()" style="width:100%;margin-bottom:12px">应用场景</button>
+    <h2>Agent 详情</h2>
+    <select id="atype" onchange="loadAgents()">
+      <option value="household">家庭</option><option value="firm">企业</option><option value="trader">交易者</option><option value="bank">银行</option>
+    </select>
+    <div class="alist" id="alist"></div>
+  </div>
+</div>
+
+<div class="card">
+  <button class="btn btn-sm" onclick="exportCSV()">下载 CSV</button>
+</div>
+
+<script>
+var GFIELD='gdp';
+var GTIMER=null;
+var GPLAY=false;
+
+(function(){
+  var CFG=[["gdp","GDP","#16a34a"],["unemployment","失业率(%)","#dc2626"],["gini","基尼系数","#9333ea"],["stock_price","股价","#d97706"],["price_index","物价指数","#64748b"],["chart_vol","波动率","#f97316"],["chart_bdr","坏账率(%)","#ec4899"],["loans","信贷总量","#0891b2"],["chart_systemic","系统风险","#dc2626"]];
+  var SID=['n_households','n_firms','tax_rate','base_interest_rate','min_wage','productivity','gov_purchase','shock_prob'];
+  var SCEN={'经济危机':{'base_interest_rate':15,'tax_rate':25},'宽松政策':{'base_interest_rate':1,'tax_rate':5,'subsidy':15},'高税高补贴':{'tax_rate':40,'subsidy':20,'min_wage':15},'自由市场':{'tax_rate':5,'base_interest_rate':2,'subsidy':0,'min_wage':0},'政府刺激':{'gov_purchase':150,'tax_rate':12,'subsidy':8},'金融危机':{'base_interest_rate':20,'tax_rate':30,'shock_prob':15}};
+  refresh();
+  setInterval(refresh, 2000);
+  loadAgents();
+  showChart('gdp');
+})();
+
+function refresh(){
+  var x=new XMLHttpRequest();
+  x.open('GET','/api/state',true);
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      try{
+        var d=JSON.parse(x.responseText);
+        document.getElementById('cycle').textContent='第 '+(d.cycle||0)+' 轮';
+        updateStats(d.last);
+        updateChart(d.history);
+      }catch(e){console.error(e);}
+    }
+  };
+  x.send();
+}
+
+function updateStats(s){
+  if(!s)return;
+  var cards=[
+    ['gdp','GDP',fk(s.gdp),''],
+    ['price_index','物价',(s.price_index||100).toFixed(1),''],
+    ['stock_price','股价',(s.stock_price||0).toFixed(1),''],
+    ['unemployment','失业率',(s.unemployment||0)+'%',parseFloat(s.unemployment)>15?'danger':''],
+    ['gini','基尼',(s.gini||0).toFixed(3),parseFloat(s.gini)>0.4?'warn':''],
+    ['emp_rate','就业率',(s.emp_rate||0)+'%',''],
+    ['chart_vol','波动率',(s.chart_vol||0).toFixed(3),(s.chart_vol||0)>0.3?'danger':'warn'],
+    ['chart_bdr','坏账率',(s.chart_bdr||0).toFixed(1)+'%',(s.chart_bdr||0)>10?'danger':'warn'],
+    ['chart_systemic','风险',(s.chart_systemic||0).toFixed(3),(s.chart_systemic||0)>0.2?'danger':'warn'],
+    ['bankrupt','破产',s.bankrupt||0,s.bankrupt>0?'warn':''],
+    ['loans','贷款',fk(s.loans),''],
+    ['govt_rev','政府收入',fk(s.govt_rev),''],
+  ];
+  document.getElementById('stats').innerHTML=cards.map(function(c){
+    return '<div class=scard><div class=slbl2>'+c[0]+'</div><div class="sval '+c[3]+'">'+c[2]+'</div></div>';
+  }).join('');
+}
+
+function fk(n){
+  n=n||0;
+  if(n>=1e6)return(n/1e6).toFixed(1)+'M';
+  if(n>=1e3)return(n/1e3).toFixed(0)+'K';
+  return n.toFixed(0);
+}
+
+function updateChart(h){
+  var data=(h||[]).map(function(x){return x[GFIELD]||0;});
+  if(!data.length)data=[0];
+  var color='#3b82f6';
+  for(var i=0;i<CFG.length;i++){
+    if(CFG[i][0]===GFIELD){color=CFG[i][2];break;}
+  }
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/svg',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      document.getElementById('chart').innerHTML=x.responseText;
+    }
+  };
+  x.send(JSON.stringify({field:GFIELD,values:data,color:color}));
+}
+
+function showChart(f){
+  GFIELD=f;
+  var tabs=document.getElementById('tabs').getElementsByTagName('button');
+  for(var i=0;i<tabs.length;i++){
+    tabs[i].className='tabbtn'+(tabs[i].onclick.toString().indexOf(f)>0?' active':'');
+  }
+  // 触发更新
+  var h=document.getElementById('chart').innerHTML;
+  if(h&&h.indexOf('svg')>=0)updateChart(window._HIST||[]);
+  // 直接请求新svg
+  var data=(window._HIST||[]).map(function(x){return x[GFIELD]||0;});
+  if(!data.length)data=[0];
+  var color='#3b82f6';
+  for(var i=0;i<CFG.length;i++){
+    if(CFG[i][0]===GFIELD){color=CFG[i][2];break;}
+  }
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/svg',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      document.getElementById('chart').innerHTML=x.responseText;
+    }
+  };
+  x.send(JSON.stringify({field:GFIELD,values:data,color:color}));
+}
+
+function step(){
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/step',true);
+  x.onreadystatechange=function(){if(x.readyState===4)refresh();};
+  x.send();
+}
+
+function togglePlay(){
+  var btn=document.getElementById('btn-play');
+  if(GPLAY){
+    GPLAY=false;clearInterval(GTIMER);
+    btn.textContent='播放';btn.className='btn btn-grn';
+    var x=new XMLHttpRequest();x.open('POST','/api/pause',true);x.send();
+  }else{
+    GPLAY=true;
+    btn.textContent='暂停';btn.className='btn btn-org';
+    var x=new XMLHttpRequest();x.open('POST','/api/play',true);x.send();
+    if(GTIMER)clearInterval(GTIMER);
+    GTIMER=setInterval(refresh,500);
+  }
+}
+
+function reset(){
+  if(GPLAY){GPLAY=false;clearInterval(GTIMER);}
+  document.getElementById('btn-play').textContent='播放';
+  document.getElementById('btn-play').className='btn btn-grn';
+  var params={};
+  for(var i=0;i<SID.length;i++){
+    var el=document.getElementById('s-'+SID[i]);
+    if(el)params[SID[i]]=parseFloat(el.value);
+  }
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/reset',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.onreadystatechange=function(){if(x.readyState===4){refresh();}};
+  x.send(JSON.stringify(params));
+}
+
+function sl(el,key){
+  var disp=document.getElementById('v-'+key);
+  if(disp)disp.textContent=el.value;
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/param',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.send(JSON.stringify({key:parseFloat(el.value)}));
+}
+
+function applyScen(){
+  var nm=document.getElementById('scen').value;
+  var p=SCEN[nm];
+  if(!p)return;
+  for(var k in p){
+    var el=document.getElementById('s-'+k);
+    if(el){el.value=p[k];var disp=document.getElementById('v-'+k);if(disp)disp.textContent=p[k];}
+    var x=new XMLHttpRequest();
+    x.open('POST','/api/param',true);
+    x.setRequestHeader('Content-Type','application/json');
+    x.send(JSON.stringify({key:parseFloat(p[k])}));
+  }
+}
+
+function loadAgents(){
+  var t=encodeURIComponent(document.getElementById('atype').value);
+  var x=new XMLHttpRequest();
+  x.open('GET','/api/agents/'+t,true);
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      var a=JSON.parse(x.responseText)||[];
+      document.getElementById('alist').innerHTML=a.map(function(s){return'<div class=aitem>'+s+'</div>';}).join('')||'<div style="color:#94a3b8">无</div>';
+    }
+  };
+  x.send();
+}
+
+function exportCSV(){
+  var x=new XMLHttpRequest();
+  x.open('GET','/api/state',true);
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      var d=JSON.parse(x.responseText)||{};
+      var h=d.history||[];
+      if(!h.length)return;
+      var keys=Object.keys(h[0]);
+      var csv='cycle,'+keys.join(',')+'
+';
+      h.forEach(function(r){
+        csv+=(r.cycle||'')+','+keys.map(function(k){return r[k]||0;}).join(',')+'
+';
+      });
+      var a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+      a.download='economy.csv';a.click();
+    }
+  };
+  x.send();
+}
+</script>
+</body>
+</html>

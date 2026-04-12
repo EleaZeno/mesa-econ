@@ -511,9 +511,9 @@ function exportCSV(){
       var h=d.history||[];
       if(!h.length)return;
       var keys=Object.keys(h[0]);
-      var csv='cycle,'+keys.join(',')+'\n';
+      var csv='cycle,'+keys.join(',')+'\\n';
       h.forEach(function(r){
-        csv+=(r.cycle||'')+','+keys.map(function(k){return r[k]||0;}).join(',')+'\n';
+        csv+=(r.cycle||'')+','+keys.map(function(k){return r[k]||0;}).join(',')+'\\n';
       });
       var a=document.createElement('a');
       a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
