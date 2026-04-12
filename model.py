@@ -1350,6 +1350,55 @@ class EconomyModel(Model):
         self.default_count = 0
         self.capital_gains_tax_revenue = 0.0
 
+    def trigger_shock(self, shock_name: str) -> str:
+        """手动触发指定冲击，返回冲击描述"""
+        try:
+            shock_type = Shock(shock_name)
+        except ValueError:
+            shock_type = self.random.choice(list(SHOCK_EFFECTS.keys()))
+
+        effect = SHOCK_EFFECTS[shock_type]
+        self.current_shock = effect["desc"]
+
+        prod_delta = effect.get("productivity", None)
+        if callable(prod_delta):
+            self.productivity = _clamp(prod_delta(self.productivity), 0.1, 5.0)
+
+        if effect.get("bank_run", False):
+            self.systemic_risk = min(1.0, self.systemic_risk + 0.2)
+            for h in self.households:
+                if h.cash > 0:
+                    withdraw = h.cash * 0.3
+                    h.cash -= withdraw
+                    for b in self.banks:
+                        b.reserves -= withdraw
+
+        sentiment = effect.get("stock_sentiment", 0.0)
+        self.systemic_risk = min(1.0, self.systemic_risk + abs(sentiment) * 0.1)
+        return effect["desc"]
+
+    @property
+    def health_score(self) -> float:
+        """经济健康分（0-100）"""
+        # GDP（偏离目标）：25分
+        gdp_score = _clamp(self.gdp / DEFAULTS["gdp_target"], 0, 1) * 25
+
+        # 失业率：25分（4%以下满分，30%以上零分）
+        unemp_score = _clamp(1 - (self.unemployment - 0.04) / 0.26, 0, 1) * 25
+
+        # 基尼系数：20分（0.25以下满分，0.7以上零分）
+        gini_score = _clamp(1 - (self.gini - 0.25) / 0.45, 0, 1) * 20
+
+        # 金融稳定（坏账+波动率）：15分
+        bdr = getattr(self, "bank_bad_debt_rate", 0.0)
+        vol = getattr(self, "stock_volatility", 0.0)
+        fin_score = _clamp(1 - (bdr / 0.2 + vol / 0.4) / 2, 0, 1) * 15
+
+        # 股市稳定性：15分
+        vol_score = _clamp(1 - vol / 0.5, 0, 1) * 15
+
+        return round(gdp_score + unemp_score + gini_score + fin_score + vol_score, 1)
+
     def _apply_shock(self) -> None:
         """随机外部冲击（按概率触发）"""
         if self.random.random() < DEFAULTS["shock_prob"]:

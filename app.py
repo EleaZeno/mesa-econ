@@ -36,31 +36,38 @@ def step():
     _rec()
 
 
-def _rec():
-    with _lock:
+def _rec(locked=False):
+    _own_lock = False
+    if not locked:
+        _own_lock = _lock.acquire(timeout=1.0)
+        if not _own_lock:
+            return
+    try:
         if _md is None:
             return
         m = _md
-        try:
-            emp = sum(1 for h in m.households if h.employed)
-            nh = len(m.households)
-            ent = {
-                "cycle": m.cycle,
-                "gdp": round(m.gdp),
-                "unemp": round(m.unemployment * 100, 1),
-                "price": round(getattr(m, "price_index", 100.0), 1),
-                "stock": round(m.stock_price, 1),
-                "vol": round(getattr(m, "stock_volatility", 0.0), 3),
-                "bdr": round(getattr(m, "bank_bad_debt_rate", 0.0) * 100, 1),
-                "loans": round(m.total_loans_outstanding),
-                "rev": round(m.govt_revenue),
-                "bankrupt": m.bankrupt_count,
-                "gini": round(m.gini, 3),
-                "emp": emp, "nh": nh,
-                "rate": round(emp / nh * 100 if nh else 0, 1),
-            }
-        except Exception:
-            ent = {"cycle": getattr(_md, "cycle", 0)}
+        emp = sum(1 for h in m.households if h.employed)
+        nh = len(m.households)
+        ent = {
+            "cycle": m.cycle,
+            "gdp": round(m.gdp),
+            "unemp": round(m.unemployment * 100, 1),
+            "price": round(getattr(m, "price_index", 100.0), 1),
+            "stock": round(m.stock_price, 1),
+            "vol": round(getattr(m, "stock_volatility", 0.0), 3),
+            "bdr": round(getattr(m, "bank_bad_debt_rate", 0.0) * 100, 1),
+            "loans": round(m.total_loans_outstanding),
+            "rev": round(m.govt_revenue),
+            "bankrupt": m.bankrupt_count,
+            "gini": round(m.gini, 3),
+            "emp": emp, "nh": nh,
+            "rate": round(emp / nh * 100 if nh else 0, 1),
+        }
+    except Exception:
+        ent = {"cycle": getattr(_md, "cycle", 0)}
+    finally:
+        if _own_lock:
+            _lock.release()
     with _hl:
         _hist.append(ent)
         if len(_hist) > 500:
@@ -289,6 +296,39 @@ def _page():
             fv = "{:.3f}".format(v)
         p.append('<div><div class=sl>' + lbl + '</div><div class="sv ' + cls + '">' + fv + '</div></div>')
     p.append('</div></div>')
+
+    # ── 经济健康分 + 手动冲击 ──────────────────────────
+    p.append('<div class=card><h2>经济健康分</h2>')
+    p.append('<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">')
+    p.append('<div id=hscore style="font-size:40px;font-weight:800;color:#3b82f6;line-height:1">--</div>')
+    p.append('<div><div id=hlevel style="font-size:14px;font-weight:600;color:#64748b">--</div>')
+    p.append('<div style="font-size:11px;color:#94a3b8;margin-top:2px" id=hbreakdown></div></div></div>')
+    p.append('<div style="height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden">')
+    p.append('<div id=hbar style="height:100%;width:0%;background:#3b82f6;transition:width 0.4s,background 0.4s;border-radius:3px"></div></div>')
+    p.append('</div>')
+
+    # 手动冲击
+    p.append('<div class=card><h2>触发冲击</h2>')
+    p.append('<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px">')
+    for sn, sl in [("oil_crisis","石油危机"),("tech_breakthrough","技术突破"),("demand_slowdown","需求骤降"),("trade_war","贸易战"),("banking_panic","银行恐慌"),("recovery","经济复苏")]:
+        p.append('<button type=button class="btn bb" style="font-size:11px;padding:4px 8px" onclick="triggerShock(\'' + sn + '\')">' + sl + '</button>')
+    p.append('</div>')
+    p.append('<div id=shock-msg style="font-size:11px;color:#ef4444;min-height:16px"></div>')
+    p.append('</div>')
+
+    # ── 单体追踪 ──────────────────────────────────────
+    p.append('<div class=card><h2>单体追踪</h2>')
+    p.append('<div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">')
+    p.append('<select id=track-type style="flex:1;padding:4px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px">')
+    p.append('<option value=household>家庭</option><option value=firm>企业</option>')
+    p.append('<option value=trader>交易者</option><option value=bank>银行</option></select>')
+    p.append('<input id=track-id placeholder="ID号" style="width:60px;padding:4px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px">')
+    p.append('<button type=button class="btn bb" style="font-size:12px" onclick="trackAgent()">追踪</button>')
+    p.append('</div>')
+    p.append('<div id=track-info style="font-family:monospace;font-size:11px;background:#f8fafc;padding:6px 8px;border-radius:6px;min-height:60px;color:#334155"></div>')
+    p.append('<div id=track-chart style="margin-top:6px"></div>')
+    p.append('</div>')
+
     p.append('<div class=card><h2>图表</h2><div class=tabs id=chart-tabs>')
     for fk, fl in CHART_KEYS:
         cls = "ta" if fk == ck else "tb"
@@ -378,6 +418,54 @@ def _page():
     p.append('    .catch(function(){if(_running)setTimeout(poll,2000)});')
     p.append('}')
     p.append('if(_running)setTimeout(poll,300);')
+    p.append('// ── 经济健康分轮询 ──────────────────────────')
+    p.append('function pollHealth(){')
+    p.append('  fetch("/api/health")')
+    p.append('    .then(function(r){return r.json()})')
+    p.append('    .then(function(d){')
+    p.append('      var s=document.getElementById("hscore"),l=document.getElementById("hlevel"),')
+    p.append('          b=document.getElementById("hbar"),br=document.getElementById("hbreakdown");')
+    p.append('      if(s&&d.score>0){s.textContent=d.score.toFixed(1);s.style.color=d.color;')
+    p.append('        l.textContent=d.level;l.style.color=d.color;')
+    p.append('        b.style.width=d.score+"%";b.style.background=d.color;')
+    p.append('        br.textContent="GDP"+d.gdp+" 失业"+d.unemp+"% 基尼"+d.gini+" 波动"+d.vol+" 坏账"+d.bdr+"%";')
+    p.append('      }')
+    p.append('      if(d.shock)document.getElementById("shock-msg").textContent="⚡ 当前："+d.shock;')
+    p.append('      if(_running)setTimeout(pollHealth,1000);')
+    p.append('    }).catch(function(){});')
+    p.append('}')
+    p.append('// ── 手动触发冲击 ───────────────────────────')
+    p.append('function triggerShock(name){')
+    p.append('  fetch("/api/shock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name})})')
+    p.append('    .then(function(r){return r.json()})')
+    p.append('    .then(function(d){')
+    p.append('      var el=document.getElementById("shock-msg");')
+    p.append('      if(d.ok){el.textContent="⚡ "+d.shock;el.style.color="#ef4444";poll();pollHealth();}')
+    p.append('      else{el.textContent="❌ "+d.error;el.style.color="#ef4444";}')
+    p.append('    }).catch(function(){document.getElementById("shock-msg").textContent="❌ 网络错误";});')
+    p.append('}')
+    p.append('// ── 单体追踪 ──────────────────────────────')
+    p.append('function trackAgent(){')
+    p.append('  var type=document.getElementById("track-type").value,')
+    p.append('      uid=parseInt(document.getElementById("track-id").value);')
+    p.append('  if(!uid){document.getElementById("track-info").textContent="请输入 ID 号";return;}')
+    p.append('  var routes={"household":"api/agent","firm":"api/agent","trader":"api/agent","bank":"api/agent"};')
+    p.append('  fetch("/"+routes[type]+"/"+uid)')
+    p.append('    .then(function(r){return r.json()})')
+    p.append('    .then(function(d){')
+    p.append('      var el=document.getElementById("track-info");')
+    p.append('      if(d.error){el.textContent="❌ 未找到 ID="+uid;return;}')
+    p.append('      var lines=[type[0].toUpperCase()+uid+" 详情","现金:"+d.cash+" 财富:"+d.wealth];')
+    p.append('      if(d.type==="household")lines.push("工资:"+d.salary+" 债:"+d.loan+" 股:"+d.shares+" ["+d.tier+"]");')
+    p.append('      else if(d.type==="firm")lines.push("产出:"+d.production+" 库存:"+d.inventory+" 员工:"+d.employees+" 单价:"+d.price);')
+    p.append('      else if(d.type==="trader")lines.push("持有股份:"+d.shares);')
+    p.append('      else if(d.type==="bank")lines.push("准备金:"+d.reserves+" 坏账:"+d.bad_debts);')
+    p.append('      el.innerHTML=lines.join("<br>");')
+    p.append('      el.style.border="1px solid #e2e8f0";')
+    p.append('    }).catch(function(){document.getElementById("track-info").textContent="❌ 网络错误";});')
+    p.append('}')
+    p.append('// 启动时加载健康分')
+    p.append('pollHealth();')
     p.append('</script>')
     p.append('</body></html>')
     return "\n".join(p)
@@ -442,6 +530,88 @@ def api_param():
                     except (ValueError, TypeError):
                         pass
     return jsonify({"ok": True, "updated": updates})
+
+
+@app.route("/api/shock", methods=["POST"])
+def api_shock():
+    """手动触发外生冲击"""
+    data = request.get_json() or {}
+    name = data.get("name", "")
+    with _lock:
+        if _md:
+            desc = _md.trigger_shock(name)
+            _rec(locked=True)
+            return jsonify({"ok": True, "shock": desc})
+    return jsonify({"ok": False, "error": "模型未初始化"})
+
+
+@app.route("/api/agent/<int:uid>")
+def api_agent(uid):
+    """获取指定 Agent 的详细信息"""
+    with _lock:
+        if not _md:
+            return jsonify({"error": "模型未初始化"})
+        for h in _md.households:
+            if h.unique_id == uid:
+                return jsonify({
+                    "id": uid, "type": "household",
+                    "cash": round(h.cash), "wealth": round(h.wealth),
+                    "employed": h.employed,
+                    "salary": round(h.salary),
+                    "loan": round(h.loan_principal),
+                    "shares": getattr(h, "shares_owned", 0),
+                    "tier": str(getattr(h, "income_tier", "")),
+                })
+        for f in _md.firms:
+            if f.unique_id == uid:
+                return jsonify({
+                    "id": uid, "type": "firm",
+                    "cash": round(f.cash), "wealth": round(f.wealth),
+                    "production": round(f.production, 1),
+                    "inventory": round(f.inventory, 1),
+                    "employees": f.employees,
+                    "price": round(getattr(f, "price", 0), 2),
+                })
+        for t in _md.traders:
+            if t.unique_id == uid:
+                return jsonify({
+                    "id": uid, "type": "trader",
+                    "cash": round(t.cash), "wealth": round(t.wealth),
+                    "shares": getattr(t, "shares", 0),
+                })
+        for b in _md.banks:
+            if b.unique_id == uid:
+                return jsonify({
+                    "id": uid, "type": "bank",
+                    "cash": round(b.wealth), "wealth": round(b.wealth),
+                    "reserves": round(getattr(b, "reserves", 0)),
+                    "bad_debts": round(getattr(b, "bad_debts", 0)),
+                })
+    return jsonify({"error": "Agent 未找到"})
+
+
+@app.route("/api/health")
+def api_health():
+    """经济健康分"""
+    with _lock:
+        if not _md:
+            return jsonify({"score": 0, "level": "未初始化"})
+        score = _md.health_score
+        if score >= 80:
+            level, color = "繁荣", "#16a34a"
+        elif score >= 60:
+            level, color = "稳健", "#3b82f6"
+        elif score >= 40:
+            level, color = "偏弱", "#f59e0b"
+        else:
+            level, color = "危机", "#ef4444"
+        return jsonify({"score": score, "level": level, "color": color,
+                        "gdp": round(_md.gdp),
+                        "unemp": round(_md.unemployment * 100, 1),
+                        "gini": round(_md.gini, 3),
+                        "vol": round(getattr(_md, "stock_volatility", 0), 3),
+                        "bdr": round(getattr(_md, "bank_bad_debt_rate", 0) * 100, 1),
+                        "shock": _md.current_shock})
 
 
 @app.route("/")
