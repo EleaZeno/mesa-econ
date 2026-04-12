@@ -484,6 +484,28 @@ class Household(Agent):
         stock_value = self.shares_owned * self.model.stock_price
         self.wealth = self.cash - self.loan_principal + stock_value
 
+    def _consider_migration(self) -> None:
+        """跨城迁移决策（Phase 2）"""
+        # 每轮有 3% 概率考虑迁移
+        if self.random.random() > 0.03:
+            return
+        # 迁移成本：至少需要 50 现金
+        if self.cash < 50:
+            return
+        # 计算当前城市和另一城市的失业率差
+        my_city = self.city
+        other_city = City.CITY_B if my_city == City.CITY_A else City.CITY_A
+        my_unemp = self.model.city_a_unemp if my_city == City.CITY_A else self.model.city_b_unemp
+        other_unemp = self.model.city_b_unemp if my_city == City.CITY_A else self.model.city_a_unemp
+        # 另一城市失业率低 10% 以上 → 迁移概率提升
+        unemp_diff = my_unemp - other_unemp
+        if unemp_diff > 0.10 and self.random.random() < 0.5:
+            # 执行迁移
+            self.city = other_city
+            self.cash -= 50  # 迁移成本
+            self.employed = False  # 摩擦性失业（1 轮）
+            self.employer = None
+
     def update_credit_score(self) -> None:
         """
         信用评分更新：
@@ -515,6 +537,7 @@ class Household(Agent):
         self.search_job()
         self.update_credit_score()
         self.update_wealth()
+        self._consider_migration()
 
 
 class Firm(Agent):
@@ -874,6 +897,32 @@ class Firm(Agent):
         self.apply_for_loan()
         self.repay_loan()
         self.update_wealth()
+        self._consider_migration()
+
+    def _consider_migration(self) -> None:
+        """企业跨城迁移（Phase 2）"""
+        # 每轮 2% 概率考虑迁移
+        if self.random.random() > 0.02:
+            return
+        # 迁移成本：需要至少 200 现金
+        if self.cash < 200:
+            return
+        # 当前城市失业率高 → 本地劳动力充足，不迁移
+        my_unemp = self.model.city_a_unemp if self.city == City.CITY_A else self.model.city_b_unemp
+        other_unemp = self.model.city_b_unemp if self.city == City.CITY_A else self.model.city_a_unemp
+        # 另一城市失业率高 → 劳动力便宜，吸引迁移
+        if other_unemp - my_unemp > 0.05 and self.random.random() < 0.3:
+            other_city = City.CITY_B if self.city == City.CITY_A else City.CITY_A
+            self.city = other_city
+            self.cash -= 200  # 迁移成本
+            # 20% 员工离职
+            if self.employees > 0:
+                n_quit = max(1, int(self.employees * 0.2))
+                employed = [h for h in self.model.households if h.employer is self]
+                for h in self.random.sample(employed, min(n_quit, len(employed))):
+                    h.employed = False
+                    h.employer = None
+                    self.employees -= 1
 
 
 class Bank(Agent):
