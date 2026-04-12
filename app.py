@@ -259,6 +259,8 @@ def _page():
     p = []
     p.append("<!DOCTYPE html><html lang=zh><head><meta charset=utf-8>")
     p.append('<meta name=viewport content="width=device-width,initial-scale=1">')
+    if _run:
+        p.append('<meta http-equiv="refresh" content="1">')
     p.append("<title>经济沙盘 v3.3</title>")
     p.append("<style>" + CSS + "</style></head><body>")
     p.append('<h1>经济沙盘 <span style="color:#3b82f6">v3.3</span> <span class=cyc>第 ' + str(cyc) + ' 轮</span></h1>')
