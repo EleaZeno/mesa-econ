@@ -411,15 +411,20 @@ class Household(Agent):
         差异化消费：按MPC决定是否消费
         高MPC（低收入）：几乎必定消费（生存型）
         低MPC（高收入）：消费概率低（储蓄/投资型）
+        消费时同步从有库存的企业扣减库存，闭环商品市场。
         """
-        price = self.model.avg_price
-        if self.cash < price:
+        if self.goods <= 0:
             return
-        # 消费概率与MPC挂钩，略有噪声
         consume_prob = min(0.98, self.mpc + self.random.uniform(-0.05, 0.05))
         if self.random.random() < consume_prob:
-            self.cash -= price
-            self.goods += 1
+            self.goods -= 1
+            # 随机选择一家有库存的企业，扣其库存、加其营收，闭环商品市场
+            firms_with_stock = [f for f in self.model.firms if f.inventory > 0]
+            if firms_with_stock:
+                f = self.random.choice(firms_with_stock)
+                f.inventory -= 1
+                after_tax = f.price * (1 - self.model.tax_rate)
+                f.cash += after_tax
 
     def invest(self) -> None:
         """股票投资：风险厌恶决定是否参与股市"""
@@ -1391,7 +1396,8 @@ class EconomyModel(Model):
         self.govt_expenditure = total_subsidy + self.gov_purchase
         for h in self.unemployed_households:
             h.cash += self.subsidy
-        self.govt_revenue -= total_subsidy + self.gov_purchase
+        # govt_revenue 已在 Household.pay_taxes() 阶段累计，这里只扣减支出（可正可负）
+        self.govt_revenue -= (total_subsidy + self.gov_purchase)
 
         # 量化宽松：央行直接购买股票（推高股价）
         if self.qe_amount > 0 and self.traders:
