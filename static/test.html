@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>SVG 测试页（零AJAX）</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#f8fafc;color:#1e293b;padding:20px}
+h1{margin-bottom:16px}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:12px}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+.scard{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px}
+.slabel{font-size:10px;color:#94a3b8;text-transform:uppercase}
+.sval{font-size:18px;font-weight:700;color:#0f172a;margin-top:2px}
+.sval.warn{color:#d97706}
+.sval.danger{color:#dc2626}
+h2{font-size:12px;color:#64748b;margin-bottom:8px}
+table{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}
+th,td{border:1px solid #e2e8f0;padding:6px 10px;text-align:right}
+th{background:#f1f5f9;text-align:center}
+.badge{display:inline-block;background:#22c55e;color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;margin-left:12px}
+</style>
+</head>
+<body>
+<h1>SVG 图表测试 <span class="badge">零 AJAX</span></h1>
+
+<div class="card">
+  <h2>第 0 轮宏观指标</h2>
+  <div class="sgrid">
+  
+  </div>
+</div>
+
+<div class="card">
+  <h2>GDP 趋势</h2>
+  <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="200" viewBox="0 0 680 200"><line x1="50" y1="8.0" x2="670" y2="8.0" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="11.0" text-anchor="end" font-size="10" fill="#94a3b8">0.0</text><line x1="50" y1="48.5" x2="670" y2="48.5" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="51.5" text-anchor="end" font-size="10" fill="#94a3b8">-0.2</text><line x1="50" y1="89.0" x2="670" y2="89.0" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="92.0" text-anchor="end" font-size="10" fill="#94a3b8">-0.5</text><line x1="50" y1="129.5" x2="670" y2="129.5" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="132.5" text-anchor="end" font-size="10" fill="#94a3b8">-0.8</text><line x1="50" y1="170.0" x2="670" y2="170.0" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="173.0" text-anchor="end" font-size="10" fill="#94a3b8">-1.0</text><text x="50.0" y="186.0" text-anchor="middle" font-size="10" fill="#94a3b8">0</text><polyline points="50.0,170.0" fill="none" stroke="#16a34a" stroke-width="2" stroke-linejoin="round"/><path d="M 50 170 L 50.0 170.0 L 670 170 Z" fill="#16a34a" opacity="0.1"/><line x1="50" y1="8" x2="50" y2="170" stroke="#cbd5e1" stroke-width="1"/><line x1="50" y1="170" x2="670" y2="170" stroke="#cbd5e1" stroke-width="1"/></svg>
+</div>
+
+<div class="card">
+  <h2>失业率趋势</h2>
+  <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="200" viewBox="0 0 680 200"><line x1="50" y1="8.0" x2="670" y2="8.0" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="11.0" text-anchor="end" font-size="10" fill="#94a3b8">0.0</text><line x1="50" y1="48.5" x2="670" y2="48.5" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="51.5" text-anchor="end" font-size="10" fill="#94a3b8">-0.2</text><line x1="50" y1="89.0" x2="670" y2="89.0" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="92.0" text-anchor="end" font-size="10" fill="#94a3b8">-0.5</text><line x1="50" y1="129.5" x2="670" y2="129.5" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="132.5" text-anchor="end" font-size="10" fill="#94a3b8">-0.8</text><line x1="50" y1="170.0" x2="670" y2="170.0" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="173.0" text-anchor="end" font-size="10" fill="#94a3b8">-1.0</text><text x="50.0" y="186.0" text-anchor="middle" font-size="10" fill="#94a3b8">0</text><polyline points="50.0,170.0" fill="none" stroke="#dc2626" stroke-width="2" stroke-linejoin="round"/><path d="M 50 170 L 50.0 170.0 L 670 170 Z" fill="#dc2626" opacity="0.1"/><line x1="50" y1="8" x2="50" y2="170" stroke="#cbd5e1" stroke-width="1"/><line x1="50" y1="170" x2="670" y2="170" stroke="#cbd5e1" stroke-width="1"/></svg>
+</div>
+
+<div class="card">
+  <h2>基尼系数趋势</h2>
+  <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="200" viewBox="0 0 680 200"><line x1="50" y1="8.0" x2="670" y2="8.0" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="11.0" text-anchor="end" font-size="10" fill="#94a3b8">0.0</text><line x1="50" y1="48.5" x2="670" y2="48.5" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="51.5" text-anchor="end" font-size="10" fill="#94a3b8">-0.2</text><line x1="50" y1="89.0" x2="670" y2="89.0" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="92.0" text-anchor="end" font-size="10" fill="#94a3b8">-0.5</text><line x1="50" y1="129.5" x2="670" y2="129.5" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="132.5" text-anchor="end" font-size="10" fill="#94a3b8">-0.8</text><line x1="50" y1="170.0" x2="670" y2="170.0" stroke="#e2e8f0" stroke-width="1"/><text x="46" y="173.0" text-anchor="end" font-size="10" fill="#94a3b8">-1.0</text><text x="50.0" y="186.0" text-anchor="middle" font-size="10" fill="#94a3b8">0</text><polyline points="50.0,170.0" fill="none" stroke="#9333ea" stroke-width="2" stroke-linejoin="round"/><path d="M 50 170 L 50.0 170.0 L 670 170 Z" fill="#9333ea" opacity="0.1"/><line x1="50" y1="8" x2="50" y2="170" stroke="#cbd5e1" stroke-width="1"/><line x1="50" y1="170" x2="670" y2="170" stroke="#cbd5e1" stroke-width="1"/></svg>
+</div>
+
+<div class="card">
+  <h2>最近 5 轮数据</h2>
+  <table>
+    <tr><th>轮次</th><th>GDP</th><th>失业率</th><th>基尼</th><th>股价</th></tr>
+    
+  </table>
+</div>
+
+<div style="margin-top:20px;padding:12px;background:#f1f5f9;border-radius:6px;font-size:13px;color:#64748b">
+  此页面所有图表均为服务器端 SVG，无任何 JavaScript 和 AJAX 调用。<br>
+  如果你看到上面的 SVG 折线图 → 说明 SVG 渲染正常，主页面的问题在 JavaScript/AJAX 层。
+</div>
+</body>
+</html>

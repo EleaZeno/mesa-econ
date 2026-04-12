@@ -231,10 +231,17 @@ def build_page():
         first = False
     scen_js += "};"
 
+    # 生成初始 SVG 图表（内嵌，不依赖 AJAX）
+    with _history_lock:
+        hist_snapshot = list(_history)
+    init_gdp = [h.get('gdp', 0) for h in hist_snapshot] or [0]
+    init_svg = make_svg(init_gdp, color="#16a34a")
+
     html = _PAGE_HTML
     html = html.replace("__SLIDERS__", sliders_h)
     html = html.replace("__SCENARIOS__", scen_h)
     html = html.replace("__TAB_BUTTONS__", tabs_h)
+    html = html.replace("__INIT_SVG__", init_svg)
     html = html.replace("/* __CFG_JS__ */", cfg_js)
     html = html.replace("/* __SID_JS__ */", slider_ids)
     html = html.replace("/* __SCEN_JS__ */", scen_js)
@@ -300,7 +307,7 @@ select{width:100%;padding:6px;border-radius:6px;border:1px solid #cbd5e1;backgro
 <div class="card">
   <h2>图表</h2>
   <div class="tabs" id="tabs">__TAB_BUTTONS__</div>
-  <div id="chart">正在加载图表...</div>
+  <div id="chart">__INIT_SVG__</div>
 </div>
 
 <div class="c2">
@@ -336,7 +343,6 @@ var GPLAY=false;
   refresh();
   setInterval(refresh, 2000);
   loadAgents();
-  showChart('gdp');
 })();
 
 function refresh(){
@@ -346,6 +352,7 @@ function refresh(){
     if(x.readyState===4&&x.status===200){
       try{
         var d=JSON.parse(x.responseText);
+        window._HIST=d.history||[];
         document.getElementById('cycle').textContent='第 '+(d.cycle||0)+' 轮';
         updateStats(d.last);
         updateChart(d.history);
@@ -405,27 +412,10 @@ function showChart(f){
   GFIELD=f;
   var tabs=document.getElementById('tabs').getElementsByTagName('button');
   for(var i=0;i<tabs.length;i++){
-    tabs[i].className='tabbtn'+(tabs[i].onclick.toString().indexOf(f)>0?' active':'');
+    var fn=tabs[i].getAttribute('onclick')||'';
+    tabs[i].className='tabbtn'+(fn.indexOf(f)>0?' active':'');
   }
-  // 触发更新
-  var h=document.getElementById('chart').innerHTML;
-  if(h&&h.indexOf('svg')>=0)updateChart(window._HIST||[]);
-  // 直接请求新svg
-  var data=(window._HIST||[]).map(function(x){return x[GFIELD]||0;});
-  if(!data.length)data=[0];
-  var color='#3b82f6';
-  for(var i=0;i<CFG.length;i++){
-    if(CFG[i][0]===GFIELD){color=CFG[i][2];break;}
-  }
-  var x=new XMLHttpRequest();
-  x.open('POST','/api/svg',true);
-  x.setRequestHeader('Content-Type','application/json');
-  x.onreadystatechange=function(){
-    if(x.readyState===4&&x.status===200){
-      document.getElementById('chart').innerHTML=x.responseText;
-    }
-  };
-  x.send(JSON.stringify({field:GFIELD,values:data,color:color}));
+  updateChart(window._HIST||[]);
 }
 
 function step(){
