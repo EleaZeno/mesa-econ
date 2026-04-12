@@ -172,7 +172,7 @@ input[type=range]{width:100%;accent-color:#3b82f6;height:4px}
 .cyc{color:#94a3b8;margin-left:auto}"""
 
 
-def _page():
+def _page(app_param=None):
     with _lock:
         if _md is None:
             cyc, last = 0, {}
@@ -262,6 +262,8 @@ def _page():
     p.append("<title>经济沙盘 v3.3</title>")
     p.append("<style>" + CSS + "</style></head><body>")
     p.append('<h1>经济沙盘 <span style="color:#3b82f6">v3.3</span> <span class=cyc id=cycle>第 ' + str(cyc) + ' 轮</span></h1>')
+    if app_param:
+        p.append('<div style="background:#dcfce7;color:#166534;padding:8px 12px;border-radius:6px;margin-bottom:12px;font-size:13px">' + app_param + '</div>')
     p.append('<div class="card ctrl">')
     p.append('<form method=get style=display:inline><button type=submit name=action value=play class="btn bg">播放</button></form>')
     p.append('<form method=get style=display:inline><button type=submit name=action value=pause class="btn bo">暂停</button></form>')
@@ -286,8 +288,9 @@ def _page():
     p.append('<div class=card><h2>图表</h2><div class=tabs>')
     for fk, fl in CHART_KEYS:
         cls = "ta" if fk == ck else "tb"
-        p.append('<form method=get style=display:inline><button type=submit name=chart value=' + fk + ' class=' + cls + '>' + fl + '</button></form>')
-    p.append('</div><div id=chart>' + svg_html + '</div></div>')
+        p.append('<button type=button class=' + cls + ' onclick="_chart=\'' + fk + '\';this.form.chart.value=\'' + fk + '\';this.form.submit()">' + fl + '</button>')
+    p.append('</div><form method=get><input type=hidden name=chart value=' + ck + '>')
+    p.append('<div id=chart>' + svg_html + '</div></form></div>')
     p.append('<div class=c2>')
     p.append('<div class=card><h2>经济参数</h2><form method=get>')
     for k, lbl, mn, mx, st_v in SLIDERS:
@@ -431,10 +434,12 @@ def index():
                     pass
         if params:
             init(**params)
+            return index(app_param="参数已应用，仿真已重置")
     elif act == "apply_scen":
         sc = request.args.get("scen", "")
         if sc in SCEN_MAP:
             init(**SCEN_MAP[sc])
+            return index(app_param="场景已应用，仿真已重置")
     elif act == "export_csv":
         buf = io.StringIO()
         with _hl:
