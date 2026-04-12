@@ -10,6 +10,7 @@ _hl = threading.Lock()
 _run = False
 _stop = threading.Event()
 _thr = None
+_feedback = None  # 用于页面顶部提示
 
 
 def init(**kw):
@@ -172,7 +173,10 @@ input[type=range]{width:100%;accent-color:#3b82f6;height:4px}
 .cyc{color:#94a3b8;margin-left:auto}"""
 
 
-def _page(app_param=None):
+def _page():
+    global _feedback
+    app_param = _feedback
+    _feedback = None  # 消费掉，只显示一次
     with _lock:
         if _md is None:
             cyc, last = 0, {}
@@ -402,7 +406,7 @@ def api_live():
 
 @app.route("/")
 def index():
-    global _run, _thr
+    global _run, _thr, _feedback
     act = request.args.get("action", "")
     if act == "step":
         step()
@@ -434,12 +438,12 @@ def index():
                     pass
         if params:
             init(**params)
-            return index(app_param="参数已应用，仿真已重置")
+            _feedback = "参数已应用，仿真已重置"
     elif act == "apply_scen":
         sc = request.args.get("scen", "")
         if sc in SCEN_MAP:
             init(**SCEN_MAP[sc])
-            return index(app_param="场景已应用，仿真已重置")
+            _feedback = "场景已应用，仿真已重置"
     elif act == "export_csv":
         buf = io.StringIO()
         with _hl:
