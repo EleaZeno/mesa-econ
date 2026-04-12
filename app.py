@@ -118,9 +118,9 @@ HTML = """<!DOCTYPE html>
 <title>经济沙盘 v3.1</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:12px}
-h1{font-size:18px;color:#f8fafc;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #334155}
-.panel{background:#1e293b;border-radius:8px;padding:14px;margin-bottom:10px;border:1px solid #334155}
+body{font-family:system-ui,-apple-system,sans-serif;background:#ffffff;color:#1e293b;min-height:100vh;padding:12px}
+h1{font-size:18px;color:#1e293b;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #e2e8f0}
+.panel{background:#f8fafc;border-radius:8px;padding:14px;margin-bottom:10px;border:1px solid #e2e8f0}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .btn{background:#3b82f6;color:#fff;border:none;padding:7px 16px;border-radius:5px;cursor:pointer;font-size:13px;font-family:inherit}
 .btn:hover{background:#2563eb}
@@ -128,9 +128,9 @@ h1{font-size:18px;color:#f8fafc;margin-bottom:12px;padding-bottom:8px;border-bot
 .btn-warning{background:#f59e0b}.btn-warning:hover{background:#d97706}
 .btn-danger{background:#ef4444}.btn-danger:hover{background:#dc2626}
 .btn-sm{padding:4px 10px;font-size:12px}
-.stat{background:#0f172a;border-radius:6px;padding:8px 12px;min-width:100px;border:1px solid #334155;flex:1}
+.stat{background:#f1f5f9;border-radius:6px;padding:8px 12px;min-width:100px;border:1px solid #e2e8f0;flex:1}
 .stat-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em}
-.stat-value{font-size:18px;font-weight:700;color:#f8fafc;margin-top:2px}
+.stat-value{font-size:18px;font-weight:700;color:#1e293b;margin-top:2px}
 .stat-value.warn{color:#f59e0b}
 .stat-value.danger{color:#ef4444}
 .stat-value.good{color:#22c55e}
@@ -140,11 +140,11 @@ input[type=range]{width:100%;accent-color:#3b82f6}
 .slider-label{font-size:12px;color:#94a3b8;display:flex;justify-content:space-between;margin-bottom:2px}
 canvas{max-width:100%}
 .tab-bar{display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap}
-.tab{background:#334155;color:#94a3b8;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit}
+.tab{background:#e2e8f0;color:#64748b;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit}
 .tab.active{background:#3b82f6;color:#fff}
 .agent-list{max-height:200px;overflow-y:auto;font-size:12px;color:#94a3b8;line-height:1.6;font-family:monospace}
-.agent-item{background:#0f172a;border-radius:4px;padding:4px 8px;margin-bottom:2px}
-select{width:100%;padding:6px;border-radius:4px;background:#334155;color:#e2e8f0;border:1px solid #475569;margin-bottom:8px;font-family:inherit;font-size:13px}
+.agent-item{background:#f1f5f9;border-radius:4px;padding:4px 8px;margin-bottom:2px}
+select{width:100%;padding:6px;border-radius:4px;background:#f1f5f9;color:#1e293b;border:1px solid #cbd5e1;margin-bottom:8px;font-family:inherit;font-size:13px}
 h2{font-size:13px;color:#94a3b8;margin:12px 0 8px}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 @media(max-width:700px){.two-col{grid-template-columns:1fr}}
@@ -206,7 +206,7 @@ h2{font-size:13px;color:#94a3b8;margin:12px 0 8px}
   <button class="btn btn-sm" onclick="exportCSV()">下载 CSV</button>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/static/chart.umd.min.js"></script>
 <script>
 let chart=null, playing=false, hist=[], field='gdp', label='GDP', color='#22c55e';
 const F=['gdp','unemployment','gini','stock_price','price_index','chart_vol','chart_bdr','loans','chart_systemic'];
@@ -254,8 +254,8 @@ function updateChart(){
       options:{responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false}},
         scales:{
-          x:{grid:{color:'#334155'},ticks:{color:'#64748b',maxTicksLimit:12}},
-          y:{grid:{color:'#334155'},ticks:{color:'#64748b'}}
+          x:{grid:{color:'#e2e8f0'},ticks:{color:'#94a3b8',maxTicksLimit:12}},
+          y:{grid:{color:'#e2e8f0'},ticks:{color:'#94a3b8'}}
         }
       }
     });
