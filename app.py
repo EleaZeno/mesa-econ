@@ -305,9 +305,9 @@ def _page():
         else:
             dv = v if v is not None else (20 if k == "n_households" else 10 if k == "n_firms" else 0)
             unit = ""
-        p.append('<div class=srow><div class=slbl><span>' + lbl + '</span><b>' + str(dv) + unit + '</b></div>')
-        p.append('<input type=range name=' + k + ' min=' + str(mn) + ' max=' + str(mx) + ' step=' + str(st_v) + ' value=' + str(dv) + '></div>')
-    p.append('<button type=submit name=action value=apply_param class="btn bb" style="margin-top:8px;width:100%">应用参数</button>')
+        p.append('<div class=srow><div class=slbl><span>' + lbl + '</span><b id=sv-' + k + '>' + str(dv) + unit + '</b></div>')
+        p.append('<input type=range id=sl-' + k + ' min=' + str(mn) + ' max=' + str(mx) + ' step=' + str(st_v) + ' value=' + str(dv) + ' oninput="applySlider(\'' + k + '\',this.value)"></div>')
+    p.append('<button type=submit name=action value=apply_param class="btn bb" style="margin-top:8px;width:100%">应用参数（重置）</button>')
     p.append('</form></div>')
     p.append('<div class=card><h2>预设场景</h2><form method=get>')
     p.append('<select name=scen><option value="">-- 选择场景 --</option>')
@@ -340,6 +340,11 @@ def _page():
     p.append('      _running=d.running;')
     p.append('      if(_running)setTimeout(poll,500);')
     p.append('    }).catch(function(){});')
+    p.append('}')
+    p.append('function applySlider(k,v){')
+    p.append('  var sv=document.getElementById("sv-"+k);')
+    p.append('  if(sv)sv.textContent=v+(k==="tax_rate"||k==="base_interest_rate"||k==="shock_prob"?"%":"");')
+    p.append('  fetch("/api/param",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({[k]:parseFloat(v)})}).catch(function(){});')
     p.append('}')
     p.append('function poll(){')
     p.append('  if(!_running)return;')
@@ -409,6 +414,34 @@ def api_live():
     vals = [r.get(ck, 0) for r in h]
     svg_html = _svg(vals, CHART_CLR.get(ck, "#3b82f6"))
     return jsonify({"cycle": cyc, "stats": last, "svg": svg_html, "running": _run})
+
+
+@app.route("/api/param", methods=["POST"])
+def api_param():
+    """滑块实时调参，不重置仿真"""
+    data = request.get_json() or {}
+    pmap = [
+        ("tax_rate",             "pct"),
+        ("base_interest_rate",   "pct"),
+        ("min_wage",             "flat"),
+        ("productivity",         "flat"),
+        ("gov_purchase",         "flat"),
+        ("shock_prob",           "pct"),
+    ]
+    updates = {}
+    with _lock:
+        if _md:
+            for k, kind in pmap:
+                if k in data:
+                    try:
+                        v = float(data[k])
+                        if kind == "pct":
+                            v /= 100
+                        setattr(_md, k, v)
+                        updates[k] = v
+                    except (ValueError, TypeError):
+                        pass
+    return jsonify({"ok": True, "updated": updates})
 
 
 @app.route("/")
