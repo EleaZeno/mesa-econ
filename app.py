@@ -25,6 +25,7 @@ def init(**kw):
         _stop.set()
     with _lock:
         _md = EconomyModel(**d)
+        _md._compute_city_stats()  # 初始化后立即计算城市统计
     _hist.clear()
     _rec()
 
@@ -329,6 +330,27 @@ def _page():
     p.append('<div id=track-chart style="margin-top:6px"></div>')
     p.append('</div>')
 
+    # ── 双城对比面板 ─────────────────────────────────
+    p.append('<div class=card><h2>双城对比</h2>')
+    p.append('<div style="display:flex;gap:12px">')
+    # 城市 A
+    p.append('<div style="flex:1;padding:10px;background:#eff6ff;border-radius:8px;border-left:3px solid #3b82f6">')
+    p.append('<div style="font-weight:600;color:#1e40af;margin-bottom:6px">城市 A</div>')
+    p.append('<div style="font-size:11px;color:#64748b">人口：<span id=ca-pop>--</span></div>')
+    p.append('<div style="font-size:11px;color:#64748b">企业：<span id=ca-firms>--</span></div>')
+    p.append('<div style="font-size:11px;color:#64748b">失业率：<span id=ca-unemp>--</span>%</div>')
+    p.append('<div style="font-size:11px;color:#64748b">GDP：<span id=ca-gdp>--</span></div>')
+    p.append('</div>')
+    # 城市 B
+    p.append('<div style="flex:1;padding:10px;background:#f0fdf4;border-radius:8px;border-left:3px solid #22c55e">')
+    p.append('<div style="font-weight:600;color:#166534;margin-bottom:6px">城市 B</div>')
+    p.append('<div style="font-size:11px;color:#64748b">人口：<span id=cb-pop>--</span></div>')
+    p.append('<div style="font-size:11px;color:#64748b">企业：<span id=cb-firms>--</span></div>')
+    p.append('<div style="font-size:11px;color:#64748b">失业率：<span id=cb-unemp>--</span>%</div>')
+    p.append('<div style="font-size:11px;color:#64748b">GDP：<span id=cb-gdp>--</span></div>')
+    p.append('</div>')
+    p.append('</div></div>')
+
     p.append('<div class=card><h2>图表</h2><div class=tabs id=chart-tabs>')
     for fk, fl in CHART_KEYS:
         cls = "ta" if fk == ck else "tb"
@@ -434,6 +456,23 @@ def _page():
     p.append('      if(_running)setTimeout(pollHealth,1000);')
     p.append('    }).catch(function(){});')
     p.append('}')
+    p.append('// ── 双城数据轮询 ───────────────────────────')
+    p.append('function pollCities(){')
+    p.append('  fetch("/api/cities")')
+    p.append('    .then(function(r){return r.json()})')
+    p.append('    .then(function(d){')
+    p.append('      if(d.error)return;')
+    p.append('      document.getElementById("ca-pop").textContent=d.city_a.pop;')
+    p.append('      document.getElementById("ca-firms").textContent=d.city_a.firms;')
+    p.append('      document.getElementById("ca-unemp").textContent=d.city_a.unemp.toFixed(1);')
+    p.append('      document.getElementById("ca-gdp").textContent=d.city_a.gdp;')
+    p.append('      document.getElementById("cb-pop").textContent=d.city_b.pop;')
+    p.append('      document.getElementById("cb-firms").textContent=d.city_b.firms;')
+    p.append('      document.getElementById("cb-unemp").textContent=d.city_b.unemp.toFixed(1);')
+    p.append('      document.getElementById("cb-gdp").textContent=d.city_b.gdp;')
+    p.append('      if(_running)setTimeout(pollCities,1000);')
+    p.append('    }).catch(function(){});')
+    p.append('}')
     p.append('// ── 手动触发冲击 ───────────────────────────')
     p.append('function triggerShock(name){')
     p.append('  fetch("/api/shock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name})})')
@@ -466,6 +505,7 @@ def _page():
     p.append('}')
     p.append('// 启动时加载健康分')
     p.append('pollHealth();')
+    p.append('pollCities();')
     p.append('</script>')
     p.append('</body></html>')
     return "\n".join(p)
@@ -612,6 +652,29 @@ def api_health():
                         "vol": round(getattr(_md, "stock_volatility", 0), 3),
                         "bdr": round(getattr(_md, "bank_bad_debt_rate", 0) * 100, 1),
                         "shock": _md.current_shock})
+
+
+@app.route("/api/cities")
+def api_cities():
+    """双城竞争数据接口"""
+    with _lock:
+        if not _md:
+            return jsonify({"error": "模型未初始化"})
+        return jsonify({
+            "city_a": {
+                "pop": _md.city_a_pop,
+                "firms": _md.city_a_firms,
+                "unemp": round(_md.city_a_unemp * 100, 1),
+                "gdp": round(_md.city_a_gdp),
+            },
+            "city_b": {
+                "pop": _md.city_b_pop,
+                "firms": _md.city_b_firms,
+                "unemp": round(_md.city_b_unemp * 100, 1),
+                "gdp": round(_md.city_b_gdp),
+            },
+            "cycle": _md.cycle,
+        })
 
 
 @app.route("/")

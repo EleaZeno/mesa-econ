@@ -48,6 +48,12 @@ logger = logging.getLogger("econ")
 # 全局默认值（唯一配置源）
 # ══════════════════════════════════════════════════════════════
 
+class City(Enum):
+    """城市标签（双城竞争）"""
+    CITY_A = "city_a"   # 城市 A
+    CITY_B = "city_b"   # 城市 B
+
+
 class Industry(Enum):
     """企业所属行业"""
     MANUFACTURING = "manufacturing"   # 制造业：资本密集，边际成本高
@@ -330,6 +336,9 @@ class Household(Agent):
     def __init__(self, model: EconomyModel):
         super().__init__(model)
 
+        # ── 城市归属（50/50 随机分配）───────────────
+        self.city = self.random.choice(list(City))
+
         # ── 异质性属性 ───────────────────────────────
         self.income_tier = _draw_income_tier(self.random)
         p = INCOME_TIER_PARAMS[self.income_tier]
@@ -521,6 +530,9 @@ class Firm(Agent):
 
     def __init__(self, model: EconomyModel):
         super().__init__(model)
+
+        # ── 城市归属（50/50 随机分配）───────────────
+        self.city = self.random.choice(list(City))
 
         # ── 异质性 ─────────────────────────────────
         self.industry = _draw_industry(self.random)
@@ -877,6 +889,9 @@ class Bank(Agent):
     def __init__(self, model: EconomyModel):
         super().__init__(model)
 
+        # ── 城市归属（50/50 随机分配）───────────────
+        self.city = self.random.choice(list(City))
+
         # ── 随机选择银行类型 ─────────────────────────
         bank_type = "aggressive" if self.random.random() < 0.5 else "conservative"
         bp = BANK_PARAMS[bank_type]
@@ -997,6 +1012,10 @@ class Trader(Agent):
 
     def __init__(self, model: EconomyModel):
         super().__init__(model)
+
+        # ── 城市归属（50/50 随机分配）───────────────
+        self.city = self.random.choice(list(City))
+
         self.strategy = _draw_trader_strategy(self.random)
         self.cash: float = self.random.uniform(300, 1000)
         self.shares: int = self.random.randint(0, 20)
@@ -1236,6 +1255,16 @@ class EconomyModel(Model):
 
         # ── 资本利得税收入 ─────────────────────────────────
         self.capital_gains_tax_revenue: float = 0.0
+
+        # ── 城市级指标（双城竞争面板）──────────────────────
+        self.city_a_pop: int = 0
+        self.city_a_firms: int = 0
+        self.city_a_unemp: float = 0.0
+        self.city_a_gdp: float = 0.0
+        self.city_b_pop: int = 0
+        self.city_b_firms: int = 0
+        self.city_b_unemp: float = 0.0
+        self.city_b_gdp: float = 0.0
 
         # ── 周期计数器 ─────────────────────────────────────
         self.cycle: int = 0
@@ -1534,6 +1563,38 @@ class EconomyModel(Model):
             total_loans = sum(b.total_loans for b in self.banks) + 1e-6
             # 坏账率：[0, 1]，防止负数/超限
             self.bank_bad_debt_rate = _clamp(total_bad / total_loans, 0.0, 1.0)
+
+        # ── 城市级统计 ─────────────────────────────
+        self._compute_city_stats()
+
+    def _compute_city_stats(self) -> None:
+        """计算双城指标（供 UI 对比面板使用）"""
+        # 城市 A
+        hh_a = [h for h in self.households if h.city == City.CITY_A]
+        firm_a = [f for f in self.firms if f.city == City.CITY_A]
+        self.city_a_pop = len(hh_a)
+        self.city_a_firms = len(firm_a)
+        self.city_a_unemp = (
+            sum(1 for h in hh_a if not h.employed) / max(1, len(hh_a))
+        )
+        self.city_a_gdp = sum(
+            h.goods * self.avg_price for h in hh_a
+        ) + sum(
+            f.production * f.price for f in firm_a
+        )
+        # 城市 B
+        hh_b = [h for h in self.households if h.city == City.CITY_B]
+        firm_b = [f for f in self.firms if f.city == City.CITY_B]
+        self.city_b_pop = len(hh_b)
+        self.city_b_firms = len(firm_b)
+        self.city_b_unemp = (
+            sum(1 for h in hh_b if not h.employed) / max(1, len(hh_b))
+        )
+        self.city_b_gdp = sum(
+            h.goods * self.avg_price for h in hh_b
+        ) + sum(
+            f.production * f.price for f in firm_b
+        )
 
     def _collect_data(self) -> None:
         self.datacollector.collect(self)
