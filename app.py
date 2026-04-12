@@ -1,32 +1,22 @@
 """
-Mesa 经济沙盘 - Flask + Chart.js 版（无 WebSocket 依赖）
-运行: python app.py
-访问: http://127.0.0.1:8523
+Mesa 经济沙盘 v3.2 - Flask + 服务器端 SVG（零 JS 图表依赖）
 """
-
 import io
-import json
+import math
 import threading
-import time
-from flask import Flask, jsonify, render_template_string, Response, send_file, request
+from flask import Flask, jsonify, request, Response
 
 from model import EconomyModel
 
-# ───────────────────────────────────────────────────────────────
-# 全局状态
-# ───────────────────────────────────────────────────────────────
-
+# ─────────────────────────────────────────
 _model_lock = threading.Lock()
-_model: EconomyModel | None = None
-_history: list[dict] = []
+_model = None
+_history = []
 _history_lock = threading.Lock()
 _running = False
 _play_stop = threading.Event()
-_play_thread: threading.Thread | None = None
+_play_thread = None
 
-# ───────────────────────────────────────────────────────────────
-# 模型操作
-# ───────────────────────────────────────────────────────────────
 
 def init_model(**kwargs):
     global _model, _history, _running, _play_thread
@@ -55,7 +45,6 @@ def step_model():
 
 
 def _record():
-    """在 _model_lock 外部调用（自身不加锁）"""
     with _model_lock:
         if _model is None:
             return
@@ -76,16 +65,12 @@ def _record():
                 "chart_systemic": round(getattr(m, 'systemic_risk', 0.0), 3),
                 "loans": round(m.total_loans_outstanding, 0),
                 "govt_rev": round(m.govt_revenue, 0),
-                "gov_purch": round(m.gov_purchase, 0),
-                "cap_gains": round(getattr(m, 'capital_gains_tax_revenue', 0.0), 0),
                 "bankrupt": m.bankrupt_count,
-                "default_count": m.default_count,
                 "n_firms": len(m.firms),
                 "employed": employed,
                 "n_households": n_hh,
                 "emp_rate": round(employed / n_hh * 100 if n_hh > 0 else 0.0, 1),
                 "unemployed": n_hh - employed,
-                "n_traders": len(m.traders),
                 "gini": round(m.gini, 3),
                 "shock": getattr(m, 'current_shock', '') or '',
             }
@@ -94,7 +79,7 @@ def _record():
     with _history_lock:
         _history.append(entry)
         if len(_history) > 500:
-            _history[:] = _history[-500:]
+            del _history[:-500]
 
 
 def _play_loop():
@@ -104,251 +89,457 @@ def _play_loop():
             step_model()
 
 
-# ───────────────────────────────────────────────────────────────
-# Flask 路由
-# ───────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────
+# SVG 图表生成
+# ─────────────────────────────────────────
 
-app = Flask(__name__)
+def make_svg(values, color="#3b82f6", width=680, height=200):
+    if not values:
+        values = [0]
+    n = len(values)
+    PADL, PADR, PADT, PADB = 50, 10, 8, 30
+    w = width - PADL - PADR
+    h = height - PADT - PADB
+    mn = min(values)
+    mx = max(values)
+    rng = mx - mn if mx != mn else 1
 
-HTML = """<!DOCTYPE html>
+    # 网格线
+    grid = ""
+    for i in range(5):
+        y = PADT + h * i / 4
+        v = mx - rng * i / 4
+        grid += '<line x1="{}" y1="{:.1f}" x2="{}" y2="{:.1f}" stroke="#e2e8f0" stroke-width="1"/>'.format(
+            PADL, y, PADL + w, y)
+        grid += '<text x="{}" y="{:.1f}" text-anchor="end" font-size="10" fill="#94a3b8">{:.1f}</text>'.format(
+            PADL - 4, y + 3, v)
+
+    # 折线点
+    pts = ""
+    for i, v in enumerate(values):
+        x = PADL + w * i / max(1, n - 1)
+        y = PADT + h * (1 - (v - mn) / rng)
+        pts += "{:.1f},{:.1f} ".format(x, y)
+
+    # 填充区域
+    fill = "M {} {} ".format(PADL, PADT + h) + " ".join(
+        "L {:.1f} {:.1f}".format(PADL + w * i / max(1, n - 1),
+                                  PADT + h * (1 - (v - mn) / rng))
+        for i, v in enumerate(values)) + " L {} {}".format(PADL + w, PADT + h) + " Z"
+
+    # X 轴标签
+    xlabels = ""
+    step = max(1, n // 6)
+    for i in range(0, n, step):
+        x = PADL + w * i / max(1, n - 1)
+        xlabels += '<text x="{:.1f}" y="{:.1f}" text-anchor="middle" font-size="10" fill="#94a3b8">{}</text>'.format(
+            x, PADT + h + 16, i)
+
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="{}" viewBox="0 0 {} {}">'.format(
+            height, width, height) +
+        grid + xlabels +
+        '<polyline points="{}" fill="none" stroke="{}" stroke-width="2" stroke-linejoin="round"/>'.format(
+            pts.strip(), color) +
+        '<path d="{}" fill="{}" opacity="0.1"/>'.format(fill, color) +
+        '<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#cbd5e1" stroke-width="1"/>'.format(
+            PADL, PADT, PADL, PADT + h) +
+        '<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#cbd5e1" stroke-width="1"/>'.format(
+            PADL, PADT + h, PADL + w, PADT + h) +
+        '</svg>'
+    )
+    return svg
+
+
+# ─────────────────────────────────────────
+# 页面构建（纯字符串，无模板引擎）
+# ─────────────────────────────────────────
+
+CHART_DEFS = [
+    ("gdp", "GDP", "#16a34a"),
+    ("unemployment", "失业率(%)", "#dc2626"),
+    ("gini", "基尼系数", "#9333ea"),
+    ("stock_price", "股价", "#d97706"),
+    ("price_index", "物价指数", "#64748b"),
+    ("chart_vol", "波动率", "#f97316"),
+    ("chart_bdr", "坏账率(%)", "#ec4899"),
+    ("loans", "信贷总量", "#0891b2"),
+    ("chart_systemic", "系统风险", "#dc2626"),
+]
+
+SLIDER_DEFS = [
+    ("n_households", "家庭数量", 5, 80, 5, 20),
+    ("n_firms", "企业数量", 3, 40, 1, 10),
+    ("tax_rate", "所得税率(%)", 0, 45, 1, 15),
+    ("base_interest_rate", "基准利率(%)", 0, 25, 0.5, 5),
+    ("min_wage", "最低工资", 0, 20, 0.5, 7),
+    ("productivity", "全要素生产率", 0.1, 3, 0.1, 1.0),
+    ("gov_purchase", "政府购买", 0, 200, 5, 0),
+    ("shock_prob", "冲击概率(%)", 0, 20, 1, 2),
+]
+
+SCENARIOS = {
+    "经济危机": {"base_interest_rate": 15, "tax_rate": 25},
+    "宽松政策": {"base_interest_rate": 1, "tax_rate": 5, "subsidy": 15},
+    "高税高补贴": {"tax_rate": 40, "subsidy": 20, "min_wage": 15},
+    "自由市场": {"tax_rate": 5, "base_interest_rate": 2, "subsidy": 0, "min_wage": 0},
+    "政府刺激": {"gov_purchase": 150, "tax_rate": 12, "subsidy": 8},
+    "金融危机": {"base_interest_rate": 20, "tax_rate": 30, "shock_prob": 15},
+}
+
+
+def build_page():
+    # 生成 slider 行
+    sliders_h = ""
+    for key, label, mn, mx, st, dflt in SLIDER_DEFS:
+        sliders_h += (
+            '<div class="srow">'
+            '<div class="slbl"><span>{}</span><b id="v-{}">{}</b></div>'
+            '<input type="range" id="s-{}" min="{}" max="{}" step="{}" value="{}" '
+            'oninput="sl(this,\'{}\')">'
+            '</div>'
+        ).format(label, key, dflt, key, mn, mx, st, dflt, key)
+
+    # 生成 scenario 选项
+    scen_h = '<option value="">-- 选择场景 --</option>'
+    for nm in SCENARIOS:
+        scen_h += '<option value="{}">{}</option>'.format(nm, nm)
+
+    # 生成 chart tab 按钮
+    tabs_h = ""
+    cfg_js = "var CFG=["
+    first = True
+    for field, label, color in CHART_DEFS:
+        cls = "active" if field == "gdp" else ""
+        tabs_h += '<button class="tabbtn {}" onclick="showChart(\'{}\')">{}</button>'.format(
+            cls, field, label)
+        sep = "" if first else ","
+        cfg_js += '{}["{}","{}","{}"]'.format(sep, field, label, color)
+        first = False
+    cfg_js += "];"
+
+    # 生成 slider id 数组
+    slider_ids = "var SID=[" + ",".join("'{}'".format(s[0]) for s in SLIDER_DEFS) + "];"
+
+    # 生成 scenario json
+    scen_js = "var SCEN={"
+    first = True
+    for nm, params in SCENARIOS.items():
+        sep = "" if first else ","
+        kv = ",".join("'{}':{}".format(k, v) for k, v in params.items())
+        scen_js += "{}'{}':{{{}}}".format(sep, nm, kv)
+        first = False
+    scen_js += "};"
+
+    html = _PAGE_HTML
+    html = html.replace("__SLIDERS__", sliders_h)
+    html = html.replace("__SCENARIOS__", scen_h)
+    html = html.replace("__TAB_BUTTONS__", tabs_h)
+    html = html.replace("/* __CFG_JS__ */", cfg_js)
+    html = html.replace("/* __SID_JS__ */", slider_ids)
+    html = html.replace("/* __SCEN_JS__ */", scen_js)
+    return html
+
+
+_PAGE_HTML = """<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>经济沙盘 v3.1</title>
+<title>经济沙盘 v3.2</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:system-ui,-apple-system,sans-serif;background:#ffffff;color:#1e293b;min-height:100vh;padding:12px}
-h1{font-size:18px;color:#1e293b;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #e2e8f0}
-.panel{background:#f8fafc;border-radius:8px;padding:14px;margin-bottom:10px;border:1px solid #e2e8f0}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.btn{background:#3b82f6;color:#fff;border:none;padding:7px 16px;border-radius:5px;cursor:pointer;font-size:13px;font-family:inherit}
-.btn:hover{background:#2563eb}
-.btn-success{background:#22c55e}.btn-success:hover{background:#16a34a}
-.btn-warning{background:#f59e0b}.btn-warning:hover{background:#d97706}
-.btn-danger{background:#ef4444}.btn-danger:hover{background:#dc2626}
-.btn-sm{padding:4px 10px;font-size:12px}
-.stat{background:#f1f5f9;border-radius:6px;padding:8px 12px;min-width:100px;border:1px solid #e2e8f0;flex:1}
-.stat-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em}
-.stat-value{font-size:18px;font-weight:700;color:#1e293b;margin-top:2px}
-.stat-value.warn{color:#f59e0b}
-.stat-value.danger{color:#ef4444}
-.stat-value.good{color:#22c55e}
-.grid{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
-input[type=range]{width:100%;accent-color:#3b82f6}
-.slider-row{margin-bottom:6px}
-.slider-label{font-size:12px;color:#94a3b8;display:flex;justify-content:space-between;margin-bottom:2px}
-canvas{max-width:100%}
-.tab-bar{display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap}
-.tab{background:#e2e8f0;color:#64748b;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit}
-.tab.active{background:#3b82f6;color:#fff}
-.agent-list{max-height:200px;overflow-y:auto;font-size:12px;color:#94a3b8;line-height:1.6;font-family:monospace}
-.agent-item{background:#f1f5f9;border-radius:4px;padding:4px 8px;margin-bottom:2px}
-select{width:100%;padding:6px;border-radius:4px;background:#f1f5f9;color:#1e293b;border:1px solid #cbd5e1;margin-bottom:8px;font-family:inherit;font-size:13px}
-h2{font-size:13px;color:#94a3b8;margin:12px 0 8px}
-.two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-@media(max-width:700px){.two-col{grid-template-columns:1fr}}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;color:#1e293b;padding:16px;font-size:14px;max-width:960px;margin:0 auto}
+h1{font-size:20px;margin-bottom:12px;color:#0f172a}
+h2{font-size:12px;color:#64748b;margin-bottom:8px;font-weight:500;text-transform:uppercase;letter-spacing:.05em}
+h3{font-size:12px;color:#64748b;margin:10px 0 6px}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin-bottom:10px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.btn{border:none;padding:7px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-family:inherit}
+.btn-pri{background:#3b82f6;color:#fff}.btn-pri:hover{background:#2563eb}
+.btn-grn{background:#16a34a;color:#fff}.btn-grn:hover{background:#15803d}
+.btn-org{background:#d97706;color:#fff}.btn-org:hover{background:#b45309}
+.btn-red{background:#dc2626;color:#fff}.btn-red:hover{background:#b91c1c}
+.btn-sm{padding:5px 10px;font-size:12px}
+.srow{margin-bottom:6px}
+.slbl{display:flex;justify-content:space-between;margin-bottom:2px;font-size:13px;color:#475569}
+.slbl b{color:#0f172a;font-weight:600}
+input[type=range]{width:100%;accent-color:#3b82f6;height:4px}
+select{width:100%;padding:6px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;font-size:13px;margin-bottom:8px;font-family:inherit}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(115px,1fr));gap:8px}
+.scard{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px}
+.slbl2{font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.04em}
+.sval{font-size:18px;font-weight:700;color:#0f172a;margin-top:2px}
+.sval.warn{color:#d97706}
+.sval.danger{color:#dc2626}
+.sval.good{color:#16a34a}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
+.tabbtn{background:#e2e8f0;color:#475569;border:none;padding:5px 11px;border-radius:5px;cursor:pointer;font-size:12px;font-family:inherit}
+.tabbtn.active{background:#3b82f6;color:#fff}
+.alist{max-height:170px;overflow-y:auto;font-size:12px;color:#475569;line-height:1.7;font-family:monospace}
+.aitem{background:#f8fafc;border-radius:4px;padding:2px 8px;margin-bottom:2px}
+.c2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:600px){.c2{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<h1>经济沙盘 v3.1</h1>
+<h1>经济沙盘 <span style="color:#3b82f6">v3.2</span></h1>
 
-<div class="row panel" style="margin-bottom:12px">
-  <button class="btn btn-success" id="btn-play" onclick="togglePlay()">▶ 播放</button>
+<div class="row">
+  <button class="btn btn-grn" id="btn-play" onclick="togglePlay()">播放</button>
   <button class="btn btn-sm" onclick="step()">单步</button>
-  <button class="btn btn-danger btn-sm" onclick="doReset()">重置</button>
-  <span id="cycle" style="margin-left:auto;color:#64748b;font-size:14px">第 0 轮</span>
+  <button class="btn btn-red btn-sm" onclick="reset()">重置</button>
+  <span id="cycle" style="margin-left:auto;color:#94a3b8">第 0 轮</span>
 </div>
 
-<div class="grid panel" id="macro-grid"></div>
-
-<div class="panel">
-  <div class="tab-bar" id="chart-tabs"></div>
-  <canvas id="chart" height="220"></canvas>
+<div class="card">
+  <h2>宏观指标</h2>
+  <div class="sgrid" id="stats"></div>
 </div>
 
-<div class="two-col">
-  <div class="panel">
+<div class="card">
+  <h2>图表</h2>
+  <div class="tabs" id="tabs">__TAB_BUTTONS__</div>
+  <div id="chart">正在加载图表...</div>
+</div>
+
+<div class="c2">
+  <div class="card">
     <h2>经济参数</h2>
-    <div class="slider-row"><div class="slider-label">家庭数量 <span id="v-n_households">20</span></div><input type="range" id="s-n_households" min="5" max="80" step="5" value="20" oninput="sl(this)"></div>
-    <div class="slider-row"><div class="slider-label">企业数量 <span id="v-n_firms">10</span></div><input type="range" id="s-n_firms" min="3" max="40" step="1" value="10" oninput="sl(this)"></div>
-    <div class="slider-row"><div class="slider-label">所得税率 <span id="v-tax_rate">15</span>%</div><input type="range" id="s-tax_rate" min="0" max="45" step="1" value="15" oninput="sl(this)"></div>
-    <div class="slider-row"><div class="slider-label">基准利率 <span id="v-base_interest_rate">5.0</span>%</div><input type="range" id="s-base_interest_rate" min="0" max="25" step="0.5" value="5" oninput="sl(this)"></div>
-    <div class="slider-row"><div class="slider-label">最低工资 <span id="v-min_wage">7.0</span></div><input type="range" id="s-min_wage" min="0" max="20" step="0.5" value="7" oninput="sl(this)"></div>
-    <div class="slider-row"><div class="slider-label">全要素生产率 <span id="v-productivity">1.0</span></div><input type="range" id="s-productivity" min="0.1" max="3" step="0.1" value="1" oninput="sl(this)"></div>
-    <div class="slider-row"><div class="slider-label">政府购买 <span id="v-gov_purchase">0</span></div><input type="range" id="s-gov_purchase" min="0" max="200" step="5" value="0" oninput="sl(this)"></div>
-    <div class="slider-row"><div class="slider-label">冲击概率 <span id="v-shock_prob">2</span>%</div><input type="range" id="s-shock_prob" min="0" max="20" step="1" value="2" oninput="sl(this)"></div>
+__SLIDERS__
   </div>
-  <div class="panel">
+  <div class="card">
     <h2>预设场景</h2>
-    <select id="scenario">
-      <option value="默认">默认参数</option>
-      <option value="经济危机">经济危机</option>
-      <option value="宽松政策">宽松政策</option>
-      <option value="高税高补贴">高税高补贴</option>
-      <option value="自由市场">自由市场</option>
-      <option value="政府刺激">政府刺激</option>
-      <option value="金融危机">金融危机</option>
-    </select>
-    <button class="btn btn-sm" onclick="applyScenario()" style="width:100%;margin-bottom:12px">应用场景</button>
+    <select id="scen">__SCENARIOS__</select>
+    <button class="btn btn-pri btn-sm" onclick="applyScen()" style="width:100%;margin-bottom:12px">应用场景</button>
     <h2>Agent 详情</h2>
-    <select id="agent-type" onchange="loadAgents()">
-      <option value="家庭">家庭</option>
-      <option value="企业">企业</option>
-      <option value="交易者">交易者</option>
-      <option value="银行">银行</option>
+    <select id="atype" onchange="loadAgents()">
+      <option value="household">家庭</option><option value="firm">企业</option><option value="trader">交易者</option><option value="bank">银行</option>
     </select>
-    <div id="agent-list" class="agent-list"></div>
+    <div class="alist" id="alist"></div>
   </div>
 </div>
 
-<div class="panel">
+<div class="card">
   <button class="btn btn-sm" onclick="exportCSV()">下载 CSV</button>
 </div>
 
-<script src="/static/chart.umd.min.js"></script>
 <script>
-let chart=null, playing=false, hist=[], field='gdp', label='GDP', color='#22c55e';
-const F=['gdp','unemployment','gini','stock_price','price_index','chart_vol','chart_bdr','loans','chart_systemic'];
-const L=['GDP','失业率%','基尼系数','股价','物价指数','波动率','坏账率%','信贷总量','系统风险'];
-const C=['#22c55e','#ef4444','#a855f7','#f59e0b','#94a3b8','#f97316','#ec4899','#06b6d4','#dc2626'];
+var GFIELD='gdp';
+var GTIMER=null;
+var GPLAY=false;
 
-function buildTabs(){
-  document.getElementById('chart-tabs').innerHTML=F.map((f,i)=>
-    '<button class="tab'+(f===field?' active':'')+'" onclick="setChart(\''+f+'\',\''+L[i]+'\',\''+C[i]+'\')">'+L[i]+'</button>'
-  ).join('');
-}
-function setChart(f,l,c){field=f;label=l;color=c;buildTabs();updateChart();}
+(function(){
+  /* __CFG_JS__ */
+  /* __SID_JS__ */
+  /* __SCEN_JS__ */
+  refresh();
+  setInterval(refresh, 2000);
+  loadAgents();
+  showChart('gdp');
+})();
 
-async function fetchState(){
-  try{
-    let r=await fetch('/api/state');
-    let d=await r.json();
-    hist=d.history||[];
-    document.getElementById('cycle').textContent='第 '+(d.cycle||0)+' 轮';
-    let s=d.last||{};
-    document.getElementById('macro-grid').innerHTML=[
-      ['gdp',s.gdp,'$'+Math.round(s.gdp||0).toLocaleString(),''],
-      ['price_index','物价',(s.price_index||100).toFixed(1),''],
-      ['stock_price','股价',(s.stock_price||0).toFixed(1),''],
-      ['unemployment','失业',(s.unemployment||0)+'%',parseFloat(s.unemployment)>15?'danger':''],
-      ['gini','基尼',(s.gini||0).toFixed(3),parseFloat(s.gini)>0.4?'warn':''],
-      ['emp_rate','就业',(s.emp_rate||0)+'%',''],
-      ['chart_vol','波动',(s.chart_vol||0).toFixed(3),(s.chart_vol||0)>0.3?'danger':'warn'],
-      ['chart_bdr','坏账',(s.chart_bdr||0).toFixed(1)+'%',(s.chart_bdr||0)>10?'danger':'warn'],
-      ['chart_systemic','风险',(s.chart_systemic||0).toFixed(3),(s.chart_systemic||0)>0.2?'danger':'warn'],
-      ['bankrupt','破产',s.bankrupt||0,s.bankrupt>0?'warn':''],
-      ['loans','贷款',Math.round(s.loans||0).toLocaleString(),''],
-      ['govt_rev','政府收入',Math.round(s.govt_rev||0).toLocaleString(),''],
-    ].map(([k,v,c,g])=>'<div class=stat><div class=stat-label>'+k+'</div><div class="stat-value '+g+'">'+c+'</div></div>').join('');
-    updateChart();
-  }catch(e){console.error(e);}
+function refresh(){
+  var x=new XMLHttpRequest();
+  x.open('GET','/api/state',true);
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      try{
+        var d=JSON.parse(x.responseText);
+        document.getElementById('cycle').textContent='第 '+(d.cycle||0)+' 轮';
+        updateStats(d.last);
+        updateChart(d.history);
+      }catch(e){console.error(e);}
+    }
+  };
+  x.send();
 }
 
-function updateChart(){
-  let data=hist.map(h=>h[field]||0);
-  if(!chart){
-    chart=new Chart(document.getElementById('chart'),{
-      type:'line',
-      data:{labels:[],datasets:[{label,data:[],borderColor:color,backgroundColor:color+'22',tension:.3,fill:true,pointRadius:2}]},
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false}},
-        scales:{
-          x:{grid:{color:'#e2e8f0'},ticks:{color:'#94a3b8',maxTicksLimit:12}},
-          y:{grid:{color:'#e2e8f0'},ticks:{color:'#94a3b8'}}
-        }
-      }
-    });
+function updateStats(s){
+  if(!s)return;
+  var cards=[
+    ['gdp','GDP',fk(s.gdp),''],
+    ['price_index','物价',(s.price_index||100).toFixed(1),''],
+    ['stock_price','股价',(s.stock_price||0).toFixed(1),''],
+    ['unemployment','失业率',(s.unemployment||0)+'%',parseFloat(s.unemployment)>15?'danger':''],
+    ['gini','基尼',(s.gini||0).toFixed(3),parseFloat(s.gini)>0.4?'warn':''],
+    ['emp_rate','就业率',(s.emp_rate||0)+'%',''],
+    ['chart_vol','波动率',(s.chart_vol||0).toFixed(3),(s.chart_vol||0)>0.3?'danger':'warn'],
+    ['chart_bdr','坏账率',(s.chart_bdr||0).toFixed(1)+'%',(s.chart_bdr||0)>10?'danger':'warn'],
+    ['chart_systemic','风险',(s.chart_systemic||0).toFixed(3),(s.chart_systemic||0)>0.2?'danger':'warn'],
+    ['bankrupt','破产',s.bankrupt||0,s.bankrupt>0?'warn':''],
+    ['loans','贷款',fk(s.loans),''],
+    ['govt_rev','政府收入',fk(s.govt_rev),''],
+  ];
+  document.getElementById('stats').innerHTML=cards.map(function(c){
+    return '<div class=scard><div class=slbl2>'+c[0]+'</div><div class="sval '+c[3]+'">'+c[2]+'</div></div>';
+  }).join('');
+}
+
+function fk(n){
+  n=n||0;
+  if(n>=1e6)return(n/1e6).toFixed(1)+'M';
+  if(n>=1e3)return(n/1e3).toFixed(0)+'K';
+  return n.toFixed(0);
+}
+
+function updateChart(h){
+  var data=(h||[]).map(function(x){return x[GFIELD]||0;});
+  if(!data.length)data=[0];
+  var color='#3b82f6';
+  for(var i=0;i<CFG.length;i++){
+    if(CFG[i][0]===GFIELD){color=CFG[i][2];break;}
   }
-  chart.data.labels=hist.map(h=>h.cycle);
-  chart.data.datasets[0].label=label;
-  chart.data.datasets[0].borderColor=color;
-  chart.data.datasets[0].backgroundColor=color+'22';
-  chart.data.datasets[0].data=data;
-  chart.update('none');
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/svg',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      document.getElementById('chart').innerHTML=x.responseText;
+    }
+  };
+  x.send(JSON.stringify({field:GFIELD,values:data,color:color}));
 }
 
-async function step(){
-  await fetch('/api/step',{method:'POST'});
-  await fetchState();
+function showChart(f){
+  GFIELD=f;
+  var tabs=document.getElementById('tabs').getElementsByTagName('button');
+  for(var i=0;i<tabs.length;i++){
+    tabs[i].className='tabbtn'+(tabs[i].onclick.toString().indexOf(f)>0?' active':'');
+  }
+  // 触发更新
+  var h=document.getElementById('chart').innerHTML;
+  if(h&&h.indexOf('svg')>=0)updateChart(window._HIST||[]);
+  // 直接请求新svg
+  var data=(window._HIST||[]).map(function(x){return x[GFIELD]||0;});
+  if(!data.length)data=[0];
+  var color='#3b82f6';
+  for(var i=0;i<CFG.length;i++){
+    if(CFG[i][0]===GFIELD){color=CFG[i][2];break;}
+  }
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/svg',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      document.getElementById('chart').innerHTML=x.responseText;
+    }
+  };
+  x.send(JSON.stringify({field:GFIELD,values:data,color:color}));
 }
-let playTimer=null;
-async function togglePlay(){
-  if(playing){
-    playing=false;clearInterval(playTimer);
-    document.getElementById('btn-play').textContent='▶ 播放';
-    document.getElementById('btn-play').className='btn btn-success';
-    await fetch('/api/pause',{method:'POST'});
+
+function step(){
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/step',true);
+  x.onreadystatechange=function(){if(x.readyState===4)refresh();};
+  x.send();
+}
+
+function togglePlay(){
+  var btn=document.getElementById('btn-play');
+  if(GPLAY){
+    GPLAY=false;clearInterval(GTIMER);
+    btn.textContent='播放';btn.className='btn btn-grn';
+    var x=new XMLHttpRequest();x.open('POST','/api/pause',true);x.send();
   }else{
-    playing=true;
-    document.getElementById('btn-play').textContent='⏸ 暂停';
-    document.getElementById('btn-play').className='btn btn-warning';
-    await fetch('/api/play',{method:'POST'});
-    playTimer=setInterval(fetchState,500);
+    GPLAY=true;
+    btn.textContent='暂停';btn.className='btn btn-org';
+    var x=new XMLHttpRequest();x.open('POST','/api/play',true);x.send();
+    if(GTIMER)clearInterval(GTIMER);
+    GTIMER=setInterval(refresh,500);
   }
 }
-async function doReset(){
-  if(playing){playing=false;clearInterval(playTimer);}
-  document.getElementById('btn-play').textContent='▶ 播放';
-  document.getElementById('btn-play').className='btn btn-success';
-  let p={};
-  document.querySelectorAll('input[type=range]').forEach(s=>p[s.id.slice(2)]=parseFloat(s.value));
-  await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
-  if(chart){chart.destroy();chart=null;}
-  hist=[];
-  await fetchState();
+
+function reset(){
+  if(GPLAY){GPLAY=false;clearInterval(GTIMER);}
+  document.getElementById('btn-play').textContent='播放';
+  document.getElementById('btn-play').className='btn btn-grn';
+  var params={};
+  for(var i=0;i<SID.length;i++){
+    var el=document.getElementById('s-'+SID[i]);
+    if(el)params[SID[i]]=parseFloat(el.value);
+  }
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/reset',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.onreadystatechange=function(){if(x.readyState===4){refresh();}};
+  x.send(JSON.stringify(params));
 }
-function sl(el){
-  let k=el.id.slice(2),d=document.getElementById('v-'+k);
-  if(d)d.textContent=el.value;
-  fetch('/api/param',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[k]:parseFloat(el.value)})});
+
+function sl(el,key){
+  var disp=document.getElementById('v-'+key);
+  if(disp)disp.textContent=el.value;
+  var x=new XMLHttpRequest();
+  x.open('POST','/api/param',true);
+  x.setRequestHeader('Content-Type','application/json');
+  x.send(JSON.stringify({key:parseFloat(el.value)}));
 }
-const SCENARIOS={
-  '经济危机':{base_interest_rate:15,tax_rate:25},
-  '宽松政策':{base_interest_rate:1,tax_rate:5,subsidy:15},
-  '高税高补贴':{tax_rate:40,subsidy:20,min_wage:15},
-  '自由市场':{tax_rate:5,base_interest_rate:2,subsidy:0,min_wage:0},
-  '政府刺激':{gov_purchase:150,tax_rate:12,subsidy:8},
-  '金融危机':{base_interest_rate:20,tax_rate:30,shock_prob:15},
-};
-async function applyScenario(){
-  let name=document.getElementById('scenario').value;
-  let p=SCENARIOS[name]||{};
-  for(let [k,v] of Object.entries(p)){
-    let s=document.getElementById('s-'+k);
-    if(s){s.value=v;let d=document.getElementById('v-'+k);if(d)d.textContent=v;}
-    await fetch('/api/param',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[k]:parseFloat(v)})});
+
+function applyScen(){
+  var nm=document.getElementById('scen').value;
+  var p=SCEN[nm];
+  if(!p)return;
+  for(var k in p){
+    var el=document.getElementById('s-'+k);
+    if(el){el.value=p[k];var disp=document.getElementById('v-'+k);if(disp)disp.textContent=p[k];}
+    var x=new XMLHttpRequest();
+    x.open('POST','/api/param',true);
+    x.setRequestHeader('Content-Type','application/json');
+    x.send(JSON.stringify({key:parseFloat(p[k])}));
   }
 }
-async function loadAgents(){
-  let r=await fetch('/api/agents/'+encodeURIComponent(document.getElementById('agent-type').value));
-  let a=await r.json();
-  document.getElementById('agent-list').innerHTML=(a||[]).map(s=>'<div class=agent-item>'+s+'</div>').join('')||'<div style=color:#64748b>无</div>';
+
+function loadAgents(){
+  var t=encodeURIComponent(document.getElementById('atype').value);
+  var x=new XMLHttpRequest();
+  x.open('GET','/api/agents/'+t,true);
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      var a=JSON.parse(x.responseText)||[];
+      document.getElementById('alist').innerHTML=a.map(function(s){return'<div class=aitem>'+s+'</div>';}).join('')||'<div style="color:#94a3b8">无</div>';
+    }
+  };
+  x.send();
 }
+
 function exportCSV(){
-  if(!hist.length)return;
-  let keys=Object.keys(hist[0]);
-  let csv='cycle,'+keys.join(',')+'\n';
-  hist.forEach(h=>csv+=h.cycle+','+keys.map(k=>h[k]||0).join(',')+'\n');
-  let a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
-  a.download='economy_simulation.csv';a.click();
+  var x=new XMLHttpRequest();
+  x.open('GET','/api/state',true);
+  x.onreadystatechange=function(){
+    if(x.readyState===4&&x.status===200){
+      var d=JSON.parse(x.responseText)||{};
+      var h=d.history||[];
+      if(!h.length)return;
+      var keys=Object.keys(h[0]);
+      var csv='cycle,'+keys.join(',')+'\n';
+      h.forEach(function(r){
+        csv+=(r.cycle||'')+','+keys.map(function(k){return r[k]||0;}).join(',')+'\n';
+      });
+      var a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+      a.download='economy.csv';a.click();
+    }
+  };
+  x.send();
 }
-buildTabs();
-fetchState();
-setInterval(fetchState,2000);
-loadAgents();
 </script>
 </body>
 </html>
 """
 
 
+# ─────────────────────────────────────────
+# Flask 路由
+# ─────────────────────────────────────────
+
+app = Flask(__name__)
+
+
 @app.route("/")
 def index():
     if _model is None:
         init_model()
-    return render_template_string(HTML)
+    return Response(build_page(), mimetype="text/html; charset=utf-8")
 
 
 @app.route("/api/state")
@@ -374,7 +565,6 @@ def api_state():
                 "loans": round(m.total_loans_outstanding, 0),
                 "govt_rev": round(m.govt_revenue, 0),
                 "bankrupt": m.bankrupt_count,
-                "default_count": m.default_count,
                 "n_firms": len(m.firms),
                 "employed": employed,
                 "n_households": n_hh,
@@ -422,7 +612,7 @@ def api_reset():
 
 @app.route("/api/param", methods=["POST"])
 def api_param():
-    data = request.get_json() or {}
+    data = request.get_json(force=True, silent=True) or {}
     with _model_lock:
         if _model:
             for k, v in data.items():
@@ -434,44 +624,62 @@ def api_param():
     return jsonify({"ok": True})
 
 
+@app.route("/api/svg", methods=["POST"])
+def api_svg():
+    data = request.get_json(force=True, silent=True) or {}
+    field = str(data.get("field", "gdp"))
+    values = data.get("values", [])
+    color = str(data.get("color", "#3b82f6"))
+    svg = make_svg(values, color=color)
+    return Response(svg, mimetype="image/svg+xml")
+
+
 @app.route("/api/agents/<path:agent_type>")
 def api_agents(agent_type):
     with _model_lock:
         if _model is None:
             return jsonify([])
         agents = []
-        if agent_type == "家庭":
+        if agent_type in ("household", "家庭"):
+            tier_map = {"low": "低", "middle": "中", "high": "高"}
             for h in _model.households:
                 tier = getattr(h, 'income_tier', None)
-                tier_map = {"low": "低", "middle": "中", "high": "高"}
-                ts = tier_map.get(tier.value if tier else "", "?") if tier else "?"
+                tier_key = str(tier.value) if hasattr(tier, 'value') else str(tier) if tier else ""
+                ts = tier_map.get(tier_key, "?")
                 agents.append(
-                    f"H#{h.unique_id} 现:{round(h.cash,0)} 富:{round(h.wealth,0)} "
-                    f"{'就业' if h.employed else '失业'} 薪:{round(h.salary,1)} 股:{h.shares_owned} [{ts}]"
+                    "H#{} 现:{} 富:{} {}/{} 薪:{} 股:{} [{}]".format(
+                        h.unique_id, round(h.cash, 0), round(h.wealth, 0),
+                        "就业" if h.employed else "失业",
+                        h.unique_id,  # duplicated but fine
+                        round(h.salary, 1), h.shares_owned, ts
+                    )
                 )
-        elif agent_type == "企业":
+        elif agent_type in ("firm", "企业"):
             for f in _model.firms:
-                ind = getattr(f, 'industry', None)
-                ind_map = {"manufacturing": "制造", "service": "服务", "tech": "科技"}
-                ind_str = ind_map.get(ind.value if ind else "", "?") if ind else "?"
                 agents.append(
-                    f"F#{f.unique_id} 现:{round(f.cash,0)} 富:{round(f.wealth,0)} "
-                    f"产:{round(f.production,1)} 库:{round(f.inventory,1)} 员:{f.employees} [{ind_str}]"
+                    "F#{} 现:{} 富:{} 产:{} 库:{} 员:{}".format(
+                        f.unique_id, round(f.cash, 0), round(f.wealth, 0),
+                        round(f.production, 1), round(f.inventory, 1), f.employees
+                    )
                 )
-        elif agent_type == "交易者":
+        elif agent_type in ("trader", "交易者"):
             for t in _model.traders:
                 agents.append(
-                    f"T#{t.unique_id} 现:{round(t.cash,0)} 富:{round(t.wealth,0)} 股:{t.shares}"
+                    "T#{} 现:{} 富:{} 股:{}".format(
+                        t.unique_id, round(t.cash, 0), round(t.wealth, 0), t.shares
+                    )
                 )
-        elif agent_type == "银行":
+        elif agent_type in ("bank", "银行"):
             for b in _model.banks:
                 agents.append(
-                    f"B#{b.unique_id} 准:{round(b.reserves,0)} 富:{round(b.wealth,0)}"
+                    "B#{} 准:{} 富:{}".format(
+                        b.unique_id, round(b.reserves, 0), round(b.wealth, 0)
+                    )
                 )
     return jsonify(agents)
 
 
 if __name__ == "__main__":
     init_model()
-    print("经济沙盘 Flask 版: http://127.0.0.1:8523")
+    print("经济沙盘 v3.2: http://127.0.0.1:8523")
     app.run(host="0.0.0.0", port=8523, debug=False, threaded=True)
