@@ -1,11 +1,15 @@
 """
-经济沙盘 v4.0 — Gradio 重写版
+经济沙盘 v4.4 — Gradio 版 (SFC 审计)
 所有价格信号（工资/利率/商品价格）Agent 自主博弈涌现，无全局硬编码。
+修复：线程锁 RLock、M0 资金守恒、迁移/求职成本闭环
 
 Run: python gradio_app.py
 """
 
 from __future__ import annotations
+
+import faulthandler
+faulthandler.enable(open('_segfault.log', 'w', encoding='utf-8'), all_threads=True)
 
 import threading
 import time
@@ -26,7 +30,7 @@ import gradio as gr
 from model import EconomyModel
 
 # ── 全局仿真状态 ─────────────────────────────────────────────────
-_lock = threading.Lock()
+_lock = threading.RLock()  # RLock: 可重入，防止 _rec/_snapshot 在 _lock 内递归死锁
 _md: Optional[EconomyModel] = None
 _hist: list = []
 _hl = threading.Lock()
@@ -114,7 +118,6 @@ def _play_loop():
 # ── matplotlib 图表生成 ──────────────────────────────────────────
 def _make_fig(hist_data: list) -> plt.Figure:
     """生成 6 格宏观指标图表（直接返回 Figure 给 gr.Plot）。"""
-    plt.close("all")
     fig = plt.figure(figsize=(12, 7), facecolor="#f8fafc")
     gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.35)
 
@@ -154,7 +157,6 @@ def _make_fig(hist_data: list) -> plt.Figure:
 
 def _make_city_fig(hist_data: list) -> plt.Figure:
     """双城 GDP + 失业率对比图。"""
-    plt.close("all")
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3), facecolor="#f8fafc")
     cycles = [e["cycle"] for e in hist_data]
 
@@ -213,11 +215,17 @@ def _snapshot():
 
 # ── Gradio 回调函数 ──────────────────────────────────────────────
 def cb_step():
-    with _lock:
-        if _md:
-            _md.step()
-            _rec()
-    return _snapshot()
+    import traceback as _tb
+    try:
+        with _lock:
+            if _md:
+                _md.step()
+                _rec()
+        return _snapshot()
+    except Exception as exc:
+        with open('_crash_cb_step.log', 'a', encoding='utf-8') as _f:
+            _f.write(f'=== cb_step crash ===\n{_tb.format_exc()}\n')
+        raise
 
 
 def cb_toggle():
@@ -265,7 +273,13 @@ def cb_shock(shock_name):
 
 def cb_poll():
     """定时器轮询：每 0.5s 刷新 UI。"""
-    return _snapshot()
+    import traceback as _tb
+    try:
+        return _snapshot()
+    except Exception as exc:
+        with open('_crash_cb_poll.log', 'a', encoding='utf-8') as _f:
+            _f.write(f'=== cb_poll crash ===\n{_tb.format_exc()}\n')
+        raise
 
 
 # ── Gradio Blocks UI ─────────────────────────────────────────────
@@ -362,6 +376,7 @@ if __name__ == "__main__":
 
     _init()
     demo = build_ui()
+    demo.queue()
     demo.launch(
         server_name="127.0.0.1",
         server_port=7860,

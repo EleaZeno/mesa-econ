@@ -1,29 +1,28 @@
 from __future__ import annotations
 """
-Mesa 经济沙盘 - 核心模型 v3.5
+Mesa 经济沙盘 - 核心模型 v4.4 (SFC 审计版)
 基于 FRB/US · NAWM · ABCE 框架设计思路
 
-v3.0 核心升级：
+v4.0 三大战役：
   ┌─────────────────────────────────────────────────────────────┐
-  │ 一、智能体异质性                                            │
-  │   Household: 三层收入 / 风险偏好 / 技能等级 / 差异化MPC     │
-  │   Firm:     三行业 × 三生命周期阶段                        │
-  │   Bank:     差异化利率（风险偏好型 vs 保守型）              │
-  │   Trader:   四策略（动量 / 价值 / 噪声 / 做市商）           │
+  │ 一、复式簿记（资金闭环）                                    │
+  │   - 工资发放：企业现金 → 员工现金                          │
+  │   - 税收归集：统一 _collect_tax() → govt_wallet            │
+  │   - 分红支付：企业现金 → 股东现金                          │
   ├─────────────────────────────────────────────────────────────┤
-  │ 二、市场精细化                                              │
-  │   商品市场: 企业独立定价 + 伯特兰竞争 + 价格粘性            │
-  │   劳动力:   技能匹配 + 失业率议价 + 摩擦性失业             │
-  │   信贷:     信用评分 + 抵押品 + 违约传导链                  │
-  │   股市:     戈登增长模型基本面锚 + 供需短期扰动            │
+  │ 二、搜寻匹配定价（废除 avg_price）                          │
+  │   - Household.consume()：搜寻3家选最低价                   │
+  │   - Firm.price_goods()：按库存去化率动态定价               │
   ├─────────────────────────────────────────────────────────────┤
-  │ 三、政策传导                                                │
-  │   政府购买（GDP拉动）+ 资本利得税 + 量化宽松（QE）         │
-  │   利率→融资成本→招聘→失业率→消费 传导链                   │
+  │ 三、利率内生化                                              │
+  │   - Bank._auto_adjust_rates()：根据准备金充裕度自动调节    │
+  │   - 移除基准利率滑块，改为市场利率只读显示                 │
   ├─────────────────────────────────────────────────────────────┤
-  │ 四、外部冲击                                                │
-  │   外生冲击：石油危机 / 技术突破 / 需求骤降 / 贸易战       │
-  │   内生螺旋：金融加速器效应（抵押品→保证金→抛售）         │
+  │ v4.4 SFC 存量-流量一致性审计                                │
+  │   - audit_stock_flow_consistency()：每轮 M0 守恒断言       │
+  │   - 修复迁移成本泄漏（HH/Firm._consider_migration）        │
+  │   - 修复求职成本泄漏（search_job → govt_wallet）           │
+  │   - 修复消费重复记账（删除 Firm.sell_goods()）             │
   └─────────────────────────────────────────────────────────────┘
 
 Mesa 3.x 最佳实践：
@@ -833,16 +832,13 @@ class Household(Agent):
 
     def consume(self) -> None:
         """
-        搜寻匹配消费（替代随机选择）：
+        搜寻匹配消费（消费者驱动）：
         
-        1. 消费意愿由 MPC 决定
+        1. 消费意愿由 MPC + 效用函数决定
         2. 消费者随机搜寻最多3家有库存的企业
-        3. 选择最低价的企业购买
-        4. 搜寻成本：看的企业越多，买到最优价的概率越高，但耗时
+        3. 选择最低价的企业购买（需有足够现金）
+        4. 完整复式簿记：消费者现金 → 企业收入 + 政府税收
         """
-        if self.goods <= 0:
-            return
-
         if not self._should_consume():
             return
 
@@ -858,17 +854,31 @@ class Household(Agent):
         # 选最低价
         best_firm = min(candidates, key=lambda f: f.price)
 
-        # 复式簿记：
-        # 1. 消费者库存-1
-        self.goods -= 1
+        # 检查支付能力
+        if self.cash < best_firm.price:
+            return
+
+        # 复式簿记（M0 守恒）：
+        # 1. 消费者支付
+        self.cash -= best_firm.price
         # 2. 企业库存-1
         best_firm.inventory -= 1
-        # 3. 现金流：消费者支付 → 企业收入 → 政府税收
+        # 3. 现金流：消费者支付 → 企业收入 + 政府税收
         tax = best_firm.price * self.model.tax_rate
         after_tax = best_firm.price * (1 - self.model.tax_rate)
         best_firm.cash += after_tax
         self.model._collect_tax(tax)
-        # （无需额外代码，min() 自然实现）
+        # 4. 城际贸易追踪
+        if self.city != best_firm.city:
+            from model import City
+            if best_firm.city == City.CITY_A:
+                self.model.city_a_exports += after_tax
+                self.model.city_b_imports += after_tax
+            else:
+                self.model.city_b_exports += after_tax
+                self.model.city_a_imports += after_tax
+        # 5. 统计本轮消费量（供 GDP 计算）
+        self.goods += 1
 
     def invest(self) -> None:
         """股票投资：风险厌恶决定是否参与股市"""
@@ -910,12 +920,14 @@ class Household(Agent):
             self.model.sell_orders += shares_sold
 
     def search_job(self) -> None:
-        """找工作（摩擦性失业：消耗现金）"""
+        """找工作（摩擦性失业：消耗现金→政府服务费）"""
         if self.employed:
             return
-        # 求职现金消耗（摩擦成本）
-        if self.cash > DEFAULTS["job_search_cost"]:
-            self.cash -= DEFAULTS["job_search_cost"]
+        # 求职现金消耗（摩擦成本→政府就业服务费）
+        cost = DEFAULTS["job_search_cost"]
+        if self.cash > cost:
+            self.cash -= cost
+            self.model.govt_wallet += cost   # M0 中性：现金→政府
 
         if self.model.firms and self.random.random() < 0.35:
             # 按技能等级匹配岗位
@@ -965,6 +977,7 @@ class Household(Agent):
         if migrate_score > 0.15 and self.random.random() < 0.5:
             self.city = other_city
             self.cash -= 50  # 迁移成本
+            self.model.govt_wallet += 50  # M0 中性：现金→政府
             self.employed = False  # 摩擦性失业
             self.employer = None
 
@@ -1256,33 +1269,6 @@ class Firm(Agent):
         # 调价冷却期
         self.price_change_cooldown = self.random.randint(1, 3)
 
-    def sell_goods(self) -> None:
-        """向居民销售商品（按价格排序：低价优先被购买）+ 城际贸易追踪（Phase 4）"""
-        if self.inventory <= 0:
-            return
-        # 价格敏感型消费：优先买便宜的
-        firms_sorted = sorted(self.model.firms, key=lambda f: f.price)
-        buyers = self.random.sample(
-            self.model.households, min(len(self.model.households), 6)
-        )
-        for h in buyers:
-            if h.cash >= self.price and h.goods < 10 and self.inventory > 0:
-                h.cash -= self.price
-                h.goods += 1
-                tax = self.price * self.model.tax_rate
-                after_tax = self.price * (1 - self.model.tax_rate)
-                self.cash += after_tax
-                self.model._collect_tax(tax)
-                self.inventory -= 1
-                # 城际贸易：企业与消费者不在同一城市
-                if h.city != self.city:
-                    if self.city == City.CITY_A:
-                        self.model.city_a_exports += after_tax
-                        self.model.city_b_imports += after_tax
-                    else:
-                        self.model.city_b_exports += after_tax
-                        self.model.city_a_imports += after_tax
-
     def pay_wages(self) -> None:
         """复式簿记工资发放：企业现金 → 员工现金（资金闭环）"""
         if self.employees <= 0:
@@ -1526,7 +1512,6 @@ class Firm(Agent):
         self.hire()
         self.produce()
         self.price_goods()
-        self.sell_goods()
         self.pay_wages()       # 复式簿记：工资从企业流向员工
         self.pay_dividend()
         self.update_wage()
@@ -1561,6 +1546,7 @@ class Firm(Agent):
         if migrate_score > 0.05 and self.random.random() < 0.3:
             self.city = other_city
             self.cash -= 200  # 迁移成本
+            self.model.govt_wallet += 200  # M0 中性：现金→政府
             # 20% 员工离职
             if self.employees > 0:
                 n_quit = max(1, int(self.employees * 0.2))
@@ -2317,6 +2303,9 @@ class EconomyModel(Model):
         self.govt_revenue = 0.0
         self.default_count = 0
         self.capital_gains_tax_revenue = 0.0
+        # 重置消费者消费统计（goods = 本周期消费次数，供 GDP 计算）
+        for h in self.households:
+            h.goods = 0
 
     def trigger_shock(self, shock_name: str) -> str:
         """手动触发指定冲击，返回冲击描述"""
