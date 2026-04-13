@@ -1,11 +1,17 @@
-import io, json, threading
-from flask import Flask, request, Response, jsonify
+import io, json, threading, logging
+from collections import deque
+from flask import Flask, request, Response, jsonify, render_template
 from model import EconomyModel
 
 app = Flask(__name__)
+app.logger.setLevel(logging.INFO)
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s in %(message)s'))
+app.logger.addHandler(_handler)
+
 _lock = threading.Lock()
 _md = None
-_hist = []
+_hist = deque(maxlen=500)  # 使用 deque 自动截断，O(1) 性能
 _hl = threading.Lock()
 _run = False
 _stop = threading.Event()
@@ -64,15 +70,15 @@ def _rec(locked=False):
             "emp": emp, "nh": nh,
             "rate": round(emp / nh * 100 if nh else 0, 1),
         }
-    except Exception:
+    except Exception as e:
+        app.logger.error(f"_rec 记录失败: {e}")
         ent = {"cycle": getattr(_md, "cycle", 0)}
     finally:
         if _own_lock:
             _lock.release()
     with _hl:
         _hist.append(ent)
-        if len(_hist) > 500:
-            del _hist[:-500]
+        # deque(maxlen=500) 自动截断，无需手动 del
 
 
 def _svg(vals, color="#3b82f6", w=640, h=180):
@@ -357,11 +363,15 @@ def _page():
     p.append('</div>')
     p.append('</div>')
     # 城市参数调节
+    # 城市参数调节 - 动态读取当前税率
+    city_a_tax_val = int(getattr(_md, 'city_a_tax', 0.12) * 100) if _md else 12
+    city_b_tax_val = int(getattr(_md, 'city_b_tax', 0.18) * 100) if _md else 18
+
     p.append('<div style="display:flex;gap:12px;margin-top:8px">')
-    p.append('<div style="flex:1"><div style="font-size:10px;color:#64748b;margin-bottom:4px">城市A税率%</div>')
-    p.append('<input type=range id=sl-ct style=width:100% min=5 max=30 step=1 value=12 oninput="setCityParam(\'city_a\',\'tax\',this.value)"></div>')
-    p.append('<div style="flex:1"><div style="font-size:10px;color:#64748b;margin-bottom:4px">城市B税率%</div>')
-    p.append('<input type=range id=sl-ctb style=width:100% min=5 max=30 step=1 value=18 oninput="setCityParam(\'city_b\',\'tax\',this.value)"></div>')
+    p.append('<div style="flex:1"><div style="font-size:10px;color:#64748b;margin-bottom:4px">城市A税率% <span id=v-cta>' + str(city_a_tax_val) + '</span></div>')
+    p.append('<input type=range id=sl-ct style=width:100% min=5 max=30 step=1 value=' + str(city_a_tax_val) + ' oninput="setCityParam(\'city_a\',\'tax\',this.value)"></div>')
+    p.append('<div style="flex:1"><div style="font-size:10px;color:#64748b;margin-bottom:4px">城市B税率% <span id=v-ctb>' + str(city_b_tax_val) + '</span></div>')
+    p.append('<input type=range id=sl-ctb style=width:100% min=5 max=30 step=1 value=' + str(city_b_tax_val) + ' oninput="setCityParam(\'city_b\',\'tax\',this.value)"></div>')
     p.append('</div></div>')
 
     p.append('<div class=card><h2>图表</h2><div class=tabs id=chart-tabs>')
@@ -496,7 +506,10 @@ def _page():
     p.append('}')
     p.append('// ── 城市参数调节 ─────────────────────────────')
     p.append('function setCityParam(city,key,val){')
-    p.append('  fetch("/api/city_param",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({city:city,key:key,value:parseFloat(val)/100})})')
+    p.append('  var v=parseFloat(val);')
+    p.append('  if(city=="city_a")document.getElementById("v-cta").textContent=v;')
+    p.append('  else document.getElementById("v-ctb").textContent=v;')
+    p.append('  fetch("/api/city_param",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({city:city,key:key,value:v/100})})')
     p.append('    .then(function(r){return r.json()})')
     p.append('    .then(function(d){if(!d.ok)console.error(d.error);});')
     p.append('}')
