@@ -277,9 +277,9 @@ def _page():
     p = []
     p.append("<!DOCTYPE html><html lang=zh><head><meta charset=utf-8>")
     p.append('<meta name=viewport content="width=device-width,initial-scale=1">')
-    p.append("<title>经济沙盘 v3.3</title>")
+    p.append("<title>经济沙盘 v3.6</title>")
     p.append("<style>" + CSS + "</style></head><body>")
-    p.append('<h1>经济沙盘 <span style="color:#3b82f6">v3.3</span> <span class=cyc id=cycle>第 ' + str(cyc) + ' 轮</span></h1>')
+    p.append('<h1>经济沙盘 <span style="color:#3b82f6">v3.6</span> <span class=cyc id=cycle>第 ' + str(cyc) + ' 轮</span></h1>')
     if app_param:
         p.append('<div style="background:#dcfce7;color:#166534;padding:8px 12px;border-radius:6px;margin-bottom:12px;font-size:13px">' + app_param + '</div>')
     p.append('<div class="card ctrl">')
@@ -826,5 +826,5 @@ def _play_loop():
 
 if __name__ == "__main__":
     init()
-    print("经济沙盘 v3.5: http://127.0.0.1:8523")
+    print("经济沙盘 v3.6: http://127.0.0.1:8523")
     app.run(host="0.0.0.0", port=8523, debug=False, threaded=True)
