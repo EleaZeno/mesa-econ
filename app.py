@@ -342,6 +342,7 @@ def _page():
     p.append('<div style="font-size:11px;color:#64748b">GDP：<span id=ca-gdp>--</span></div>')
     p.append('<div style="font-size:11px;color:#64748b">税率：<span id=ca-tax>--</span>%</div>')
     p.append('<div style="font-size:11px;color:#64748b">最低工资：<span id=ca-mw>--</span></div>')
+    p.append('<div style="font-size:11px;color:#64748b">净出口：<span id=ca-net>--</span></div>')
     p.append('</div>')
     # 城市 B
     p.append('<div style="flex:1;padding:10px;background:#f0fdf4;border-radius:8px;border-left:3px solid #22c55e">')
@@ -352,6 +353,7 @@ def _page():
     p.append('<div style="font-size:11px;color:#64748b">GDP：<span id=cb-gdp>--</span></div>')
     p.append('<div style="font-size:11px;color:#64748b">税率：<span id=cb-tax>--</span>%</div>')
     p.append('<div style="font-size:11px;color:#64748b">最低工资：<span id=cb-mw>--</span></div>')
+    p.append('<div style="font-size:11px;color:#64748b">净出口：<span id=cb-net>--</span></div>')
     p.append('</div>')
     p.append('</div>')
     # 城市参数调节
@@ -485,6 +487,10 @@ def _page():
     p.append('      document.getElementById("cb-gdp").textContent=d.city_b.gdp;')
     p.append('      document.getElementById("cb-tax").textContent=d.city_b.tax;')
     p.append('      document.getElementById("cb-mw").textContent=d.city_b.min_wage;')
+    p.append('      var netA=(d.city_a.exports-d.city_a.imports).toFixed(0);')
+    p.append('      var netB=(d.city_b.exports-d.city_b.imports).toFixed(0);')
+    p.append('      document.getElementById("ca-net").textContent=(netA>=0?"+":"")+netA;')
+    p.append('      document.getElementById("cb-net").textContent=(netB>=0?"+":"")+netB;')
     p.append('      if(_running)setTimeout(pollCities,1000);')
     p.append('    }).catch(function(){});')
     p.append('}')
@@ -690,6 +696,8 @@ def api_cities():
                 "tax": round(_md.city_a_tax * 100, 1),
                 "min_wage": round(_md.city_a_min_wage, 1),
                 "subsidy": round(_md.city_a_subsidy * 100, 1),
+                "exports": round(_md.city_a_exports, 1),
+                "imports": round(_md.city_a_imports, 1),
             },
             "city_b": {
                 "pop": _md.city_b_pop,
@@ -699,6 +707,8 @@ def api_cities():
                 "tax": round(_md.city_b_tax * 100, 1),
                 "min_wage": round(_md.city_b_min_wage, 1),
                 "subsidy": round(_md.city_b_subsidy * 100, 1),
+                "exports": round(_md.city_b_exports, 1),
+                "imports": round(_md.city_b_imports, 1),
             },
             "cycle": _md.cycle,
         })

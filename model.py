@@ -724,7 +724,7 @@ class Firm(Agent):
         self.price_change_cooldown = self.random.randint(1, 3)
 
     def sell_goods(self) -> None:
-        """向居民销售商品（按价格排序：低价优先被购买）"""
+        """向居民销售商品（按价格排序：低价优先被购买）+ 城际贸易追踪（Phase 4）"""
         if self.inventory <= 0:
             return
         # 价格敏感型消费：优先买便宜的
@@ -739,6 +739,14 @@ class Firm(Agent):
                 after_tax = self.price * (1 - self.model.tax_rate)
                 self.cash += after_tax
                 self.inventory -= 1
+                # 城际贸易：企业与消费者不在同一城市
+                if h.city != self.city:
+                    if self.city == City.CITY_A:
+                        self.model.city_a_exports += after_tax
+                        self.model.city_b_imports += after_tax
+                    else:
+                        self.model.city_b_exports += after_tax
+                        self.model.city_a_imports += after_tax
 
     def pay_dividend(self) -> None:
         """生命周期决定分红率：成熟期高分红，初创期不分"""
@@ -1353,6 +1361,12 @@ class EconomyModel(Model):
         self.city_b_subsidy = CITY_PARAMS[City.CITY_B]["subsidy_rate"]
         self.city_b_infra = CITY_PARAMS[City.CITY_B]["infrastructure"]
 
+        # ── 城际贸易统计（Phase 4）──────────────────────────
+        self.city_a_exports: float = 0.0  # 城市 A 出口额
+        self.city_b_exports: float = 0.0  # 城市 B 出口额
+        self.city_a_imports: float = 0.0  # 城市 A 进口额
+        self.city_b_imports: float = 0.0  # 城市 B 进口额
+
         # ── 周期计数器 ─────────────────────────────────────
         self.cycle: int = 0
 
@@ -1636,6 +1650,12 @@ class EconomyModel(Model):
 
     def _compute_macro(self) -> None:
         """计算宏观指标"""
+        # 每轮重置城际贸易统计
+        self.city_a_exports = 0.0
+        self.city_b_exports = 0.0
+        self.city_a_imports = 0.0
+        self.city_b_imports = 0.0
+
         self.gdp = compute_gdp(self)
         self.unemployment = compute_unemployment(self)
         self.gini = compute_gini(self)
@@ -1668,7 +1688,7 @@ class EconomyModel(Model):
             h.goods * self.avg_price for h in hh_a
         ) + sum(
             f.production * f.price for f in firm_a
-        )
+        ) + (self.city_a_exports - self.city_a_imports)
         # 城市 B
         hh_b = [h for h in self.households if h.city == City.CITY_B]
         firm_b = [f for f in self.firms if f.city == City.CITY_B]
@@ -1681,7 +1701,7 @@ class EconomyModel(Model):
             h.goods * self.avg_price for h in hh_b
         ) + sum(
             f.production * f.price for f in firm_b
-        )
+        ) + (self.city_b_exports - self.city_b_imports)
 
     def _collect_data(self) -> None:
         self.datacollector.collect(self)
