@@ -58,13 +58,13 @@ class City(Enum):
 CITY_PARAMS = {
     City.CITY_A: {
         "corporate_tax_rate": 0.12,    # 企业税率（低税吸引企业）
-        "min_wage": 7.5,               # 最低工资
+        "wage_floor": 7.5,               # 最低工资
         "subsidy_rate": 0.10,          # 补贴率
         "infrastructure": 0.8,         # 基建水平（影响生产效率）
     },
     City.CITY_B: {
         "corporate_tax_rate": 0.18,    # 企业税率（高税高福利）
-        "min_wage": 6.8,               # 最低工资（劳动力便宜）
+        "wage_floor": 6.8,               # 最低工资（劳动力便宜）
         "subsidy_rate": 0.05,          # 补贴率
         "infrastructure": 1.0,         # 基建水平（科技发达）
     },
@@ -191,7 +191,7 @@ DEFAULTS = dict(
     tax_rate=0.15,             # 所得税率
     capital_gains_tax=0.10,     # 资本利得税率
     base_interest_rate=0.05,   # 基准利率
-    min_wage=7.0,               # 最低工资
+    # min_wage 已废除v4.0
     productivity=1.0,           # 全要素生产率（TFP）
     subsidy=0.0,                # 失业补贴
     gov_purchase=0.0,          # 政府购买（新增）
@@ -425,13 +425,13 @@ class City(Enum):
 CITY_PARAMS = {
     City.CITY_A: {
         "corporate_tax_rate": 0.12,    # 企业税率（低税吸引企业）
-        "min_wage": 7.5,               # 最低工资
+        "wage_floor": 7.5,               # 最低工资
         "subsidy_rate": 0.10,          # 补贴率
         "infrastructure": 0.8,         # 基建水平（影响生产效率）
     },
     City.CITY_B: {
         "corporate_tax_rate": 0.18,    # 企业税率（高税高福利）
-        "min_wage": 6.8,               # 最低工资（劳动力便宜）
+        "wage_floor": 6.8,               # 最低工资（劳动力便宜）
         "subsidy_rate": 0.05,          # 补贴率
         "infrastructure": 1.0,         # 基建水平（科技发达）
     },
@@ -558,7 +558,7 @@ DEFAULTS = dict(
     tax_rate=0.15,             # 所得税率
     capital_gains_tax=0.10,     # 资本利得税率
     base_interest_rate=0.05,   # 基准利率
-    min_wage=7.0,               # 最低工资
+    # min_wage 已废除v4.0
     productivity=1.0,           # 全要素生产率（TFP）
     subsidy=0.0,                # 失业补贴
     gov_purchase=0.0,          # 政府购买（新增）
@@ -754,6 +754,8 @@ class Household(Agent):
         # 信用评分：初始基于技能水平（高技能→高信用）
         self.credit_score: float = 500 + self.skill_level * 100
         # 历史收入（用于信用评估）
+        # 保留工资（心理底线）：现金越少越急，现金多则挑剔
+        self.reservation_wage: float = max(2.0, 8.0 * (1.0 - min(1.0, self.cash / 200.0)))
         self.income_history: list[float] = []
 
     # ── 子行为 ─────────────────────────────────────────────
@@ -782,7 +784,7 @@ class Household(Agent):
             return
         rate = self.model.base_interest_rate
         interest = self.loan_principal * rate
-        repayment = min(self.model.min_wage * 0.1, self.loan_principal + interest)
+        repayment = min(max(2.0, self.cash * 0.05), self.loan_principal + interest)
         if self.cash >= repayment:
             self.cash -= repayment
             self.loan_principal = max(0.0, self.loan_principal - max(0.0, repayment - interest))
@@ -884,7 +886,7 @@ class Household(Agent):
             # 按技能等级匹配岗位
             candidates = [
                 f for f in self.model._cache.get('firms_with_jobs', [])
-                if f.wage_offer >= self.model.min_wage
+                if f.wage_offer >= self.reservation_wage
             ]
             if candidates:
                 firm = self.random.choice(candidates)
@@ -896,7 +898,7 @@ class Household(Agent):
                 wpremium = DEFAULTS["skill_wage_premium_mid"] if self.skill_level == 1 \
                     else DEFAULTS["skill_wage_premium_high"] if self.skill_level == 2 else 0.0
                 wage = firm.wage_offer * (1 - ur * DEFAULTS["wage_bargain_strength"]) * (1 + wpremium)
-                self.salary = max(self.model.min_wage, wage)
+                self.salary = max(self.reservation_wage, wage)
 
     def update_wealth(self) -> None:
         """财富 = 现金 - 负债 + 股票市值"""
@@ -918,8 +920,8 @@ class Household(Agent):
         other_unemp = self.model.city_b_unemp if my_city == City.CITY_A else self.model.city_a_unemp
         unemp_diff = my_unemp - other_unemp
         # 最低工资差（Phase 3）
-        my_min_wage = self.model.city_a_min_wage if my_city == City.CITY_A else self.model.city_b_min_wage
-        other_min_wage = self.model.city_b_min_wage if my_city == City.CITY_A else self.model.city_a_min_wage
+        my_min_wage = CITY_PARAMS[City.CITY_A]["wage_floor"] if my_city == City.CITY_A else CITY_PARAMS[City.CITY_B]["wage_floor"]
+        other_min_wage = CITY_PARAMS[City.CITY_B]["wage_floor"] if my_city == City.CITY_A else CITY_PARAMS[City.CITY_A]["wage_floor"]
         wage_diff = other_min_wage - my_min_wage
         # 综合迁移评分
         migrate_score = unemp_diff * 3 + wage_diff * 0.5
@@ -995,7 +997,7 @@ class Firm(Agent):
         self.cash = self.random.uniform(cash_lo, cash_hi)
 
         self.employees: int = 0
-        self.wage_offer: float = max(model.min_wage, 8.0) * ip["wage_premium"]
+        self.wage_offer: float = 8.0 * ip["wage_premium"]
         self.open_positions: int = self.random.randint(0, 4)
         self.production: float = 0.0
         self.inventory: float = 0.0
@@ -1069,7 +1071,7 @@ class Firm(Agent):
         elif self.industry == Industry.SERVICE:
             self.production = (
                 max(1, self.employees)
-                * self.model.min_wage
+                * self.wage_offer
                 * T
                 + self.random.gauss(0, noise_std)
             )
@@ -1095,7 +1097,7 @@ class Firm(Agent):
         内生定价（废除全局 avg_price 依赖）：
         
         纯粹基于自身微观信号：
-        1. 边际成本锚底：cost_per_unit = capital_intensity × min_wage × 0.5
+        1. 边际成本锚底：cost_per_unit = capital_intensity × wage_offer × 0.5
         2. 库存去化率驱动：
            - 去化率 < 20% → 降价（需求不足）
            - 去化率 > 70% → 涨价（供不应求）
@@ -1112,7 +1114,7 @@ class Firm(Agent):
             return
 
         # 边际成本
-        cost_per_unit = self._ind["capital_intensity"] * self.model.min_wage * 0.5
+        cost_per_unit = self._ind["capital_intensity"] * self.wage_offer * 0.5
         cost_per_unit = max(cost_per_unit, 1.0)
 
         # 库存去化率（本轮卖了多少 / 总库存+产量）
@@ -1203,9 +1205,9 @@ class Firm(Agent):
         ur = self.model.unemployment
         # 失业率高→压低工资（劳动市场宽松）；失业率低→提高工资（抢人）
         if ur > 0.15:
-            self.wage_offer = _clamp(self.wage_offer * 0.97, self.model.min_wage, 50.0)
+            self.wage_offer = _clamp(self.wage_offer * 0.97, 2.0, 50.0)
         elif self.inventory > 20 and self.lifecycle in (FirmLifecycle.GROWTH, FirmLifecycle.MATURE):
-            self.wage_offer = _clamp(self.wage_offer * 1.04, self.model.min_wage, 50.0)
+            self.wage_offer = _clamp(self.wage_offer * 1.04, 2.0, 50.0)
 
     def adjust_workforce(self) -> None:
         """生命周期 + 经济状态决定裁员/扩产"""
@@ -1738,7 +1740,7 @@ class Trader(Agent):
         m = self.model
         # 戈登模型估计内在价值
         avg_div_per_share = m.total_dividends / max(1, len(m.firms) * 50)
-        intrinsic = self._gordon_value(avg_div_per_share, m.base_interest_rate)
+        intrinsic = self._gordon_value(avg_div_per_share, 0.05)
         # 平滑估计
         self.intrinsic_value_estimate = 0.7 * self.intrinsic_value_estimate + 0.3 * intrinsic
 
@@ -1906,7 +1908,6 @@ class EconomyModel(Model):
 
         self.tax_rate = _clamp(kwargs.get("tax_rate", DEFAULTS["tax_rate"]), 0.0, 0.45)
         self.base_interest_rate = _clamp(kwargs.get("base_interest_rate", DEFAULTS["base_interest_rate"]), 0.0, 0.25)
-        self.min_wage = max(0.0, kwargs.get("min_wage", DEFAULTS["min_wage"]))
         self.productivity = max(0.01, kwargs.get("productivity", DEFAULTS["productivity"]))
         self.subsidy = max(0.0, kwargs.get("subsidy", DEFAULTS["subsidy"]))
         self.gov_purchase = max(0.0, kwargs.get("gov_purchase", DEFAULTS["gov_purchase"]))
@@ -1964,11 +1965,9 @@ class EconomyModel(Model):
 
         # ── 城市级参数（Phase 3：差异化政策）──────────────────
         self.city_a_tax = CITY_PARAMS[City.CITY_A]["corporate_tax_rate"]
-        self.city_a_min_wage = CITY_PARAMS[City.CITY_A]["min_wage"]
         self.city_a_subsidy = CITY_PARAMS[City.CITY_A]["subsidy_rate"]
         self.city_a_infra = CITY_PARAMS[City.CITY_A]["infrastructure"]
         self.city_b_tax = CITY_PARAMS[City.CITY_B]["corporate_tax_rate"]
-        self.city_b_min_wage = CITY_PARAMS[City.CITY_B]["min_wage"]
         self.city_b_subsidy = CITY_PARAMS[City.CITY_B]["subsidy_rate"]
         self.city_b_infra = CITY_PARAMS[City.CITY_B]["infrastructure"]
 
