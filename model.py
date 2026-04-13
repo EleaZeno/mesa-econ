@@ -347,6 +347,8 @@ class BalanceSheet:
     cost_basis: float = 0.0
     capital_stock: float = 0.0
     rnd_investment: float = 0.0
+    reserves: float = 0.0
+    stocks_value: float = 0.0
 
     @property
     def liquid_assets(self) -> float:
@@ -756,6 +758,9 @@ class Household(Agent):
         # 历史收入（用于信用评估）
         # 保留工资（心理底线）：现金越少越急，现金多则挑剔
         self.reservation_wage: float = max(2.0, 8.0 * (1.0 - min(1.0, self.cash / 200.0)))
+        # 效用参数（CES 替代弹性）
+        self.utility_alpha: float = 0.4  # 商品消费权重（vs 储蓄）
+        self.utility_rho: float = 0.5    # 替代弹性参数（0→柯布道格拉斯，1→完全替代）
         self.income_history: list[float] = []
 
     # ── 子行为 ─────────────────────────────────────────────
@@ -802,6 +807,26 @@ class Household(Agent):
             bank.reserves += deposit
             bank.deposits += deposit
 
+    def _should_consume(self) -> bool:
+        """效用最大化消费决策：
+        - CES 效用：U = [α·G^(ρ-1)/ρ + (1-α)·C^(ρ-1)/ρ]^(ρ/(ρ-1))
+        - 比较消费的边际效用 vs 储蓄的边际效用
+        - 简化实现：基于现金缓冲、就业、价格水平的综合评分
+        """
+        # 现金充裕度：现金越多，越倾向消费
+        cash_buffer = min(1.0, self.cash / 100.0)
+
+        # 就业稳定性：有工作更敢消费
+        employment_bonus = 0.3 if self.employed else 0.0
+
+        # 价格惩罚：价格越高越克制消费
+        avg_price = self.model.avg_price
+        price_factor = max(0.0, 1.0 - (avg_price - 10.0) / 50.0) if avg_price > 10 else 1.0
+
+        # 综合消费倾向
+        propensity = self.mpc * cash_buffer * price_factor + employment_bonus
+        return self.random.random() < min(0.95, propensity)
+
     def consume(self) -> None:
         """
         搜寻匹配消费（替代随机选择）：
@@ -814,8 +839,7 @@ class Household(Agent):
         if self.goods <= 0:
             return
 
-        consume_prob = min(0.98, self.mpc + self.random.uniform(-0.05, 0.05))
-        if self.random.random() >= consume_prob:
+        if not self._should_consume():
             return
 
         # 搜寻匹配：从有库存企业中随机抽样最多3家
@@ -931,6 +955,60 @@ class Household(Agent):
             self.employed = False  # 摩擦性失业
             self.employer = None
 
+
+    def consider_entrepreneurship(self) -> None:
+        """创业机制：高现金+高技能的 Household 可以创建新企业
+        
+        条件：
+        - 现金 > 300（启动资金）
+        - 技能等级 >= 2（高技能）
+        - 2% 概率触发（不是每轮都创业）
+        - 当前企业数 < 上限（防止无限增长）
+        """
+        if self.random.random() > 0.02:
+            return
+        if self.cash < 300:
+            return
+        if self.skill_level < 2:
+            return
+        # 限制最大企业数
+        if len(self.model.firms) >= 40:
+            return
+
+        # 启动资金
+        startup_cost = min(self.cash * 0.6, 500)
+        self.cash -= startup_cost
+
+        # 选择行业（高技能→偏向科技/服务）
+        industry_weights = {
+            Industry.MANUFACTURING: 0.2,
+            Industry.SERVICE: 0.4,
+            Industry.TECH: 0.4,
+        }
+        industry = self.random.choices(
+            list(industry_weights.keys()),
+            weights=list(industry_weights.values()), k=1
+        )[0]
+
+        # 创建新企业（Firm.__init__ 不接受 industry 参数，创建后覆盖）
+        new_firm = Firm(self.model)
+        new_firm.industry = industry
+        new_firm._ind = INDUSTRY_PARAMS[industry]
+        new_firm.wage_offer = 8.0 * new_firm._ind["wage_premium"]
+        new_firm.cash = startup_cost
+        self.model.firms.append(new_firm)
+        self.model.agents.add(new_firm)
+
+        # 创业者成为首任员工
+        if self.employed:
+            # 辞去当前工作
+            self.employer.employees = max(0, self.employer.employees - 1)
+            self.employer.open_positions += 1
+        self.employed = True
+        self.employer = new_firm
+        self.salary = new_firm.wage_offer
+        new_firm.employees = 1
+        new_firm.open_positions = max(0, new_firm.open_positions - 1)
     def update_credit_score(self) -> None:
         """
         信用评分更新：
@@ -963,6 +1041,7 @@ class Household(Agent):
         self.update_credit_score()
         self.update_wealth()
         self._consider_migration()
+        self.consider_entrepreneurship()
 
 
 class Firm(Agent):
@@ -1003,6 +1082,12 @@ class Firm(Agent):
         self.inventory: float = 0.0
         self.loan_principal: float = 0.0
         self.wealth: float = self.cash
+
+        # ── BalanceSheet 同步 ─────────────────────────
+        self._bs = BalanceSheet()
+        self._bs.cash = self.cash
+        self._bs.loan_principal = self.loan_principal
+
         self.dividend_per_share: float = 0.0
         self.default_probability: float = 0.0
         self.price: float = model.avg_price if model.avg_price > 1 else 10.0
@@ -1197,6 +1282,8 @@ class Firm(Agent):
 
         profit = self.cash * div_ratio
         self.cash -= profit
+        # 同步 BalanceSheet
+        self._bs.cash = self.cash
         self.dividend_per_share = _safe_div(profit, 50)
         self.model.total_dividends += profit
 
@@ -1287,6 +1374,9 @@ class Firm(Agent):
         if self.cash >= repayment:
             self.cash -= repayment
             self.loan_principal -= max(0.0, repayment - interest)
+            # 同步 BalanceSheet
+            self._bs.cash = self.cash
+            self._bs.loan_principal = self.loan_principal
         elif self.random.random() < self.default_probability:
             self._trigger_default()
 
@@ -1365,6 +1455,9 @@ class Firm(Agent):
         """企业财富 = 现金 - 负债 + 库存价值 + 固定资产"""
         inventory_value = self.inventory * self.price
         self.wealth = self.cash - self.loan_principal + inventory_value + self.capital_stock * 0.5
+        # 同步 BalanceSheet
+        self._bs.cash = self.cash
+        self._bs.loan_principal = self.loan_principal
 
     # ── 主循环 ─────────────────────────────────────────────
 
@@ -1453,6 +1546,12 @@ class Bank(Agent):
         self.capital: float = bp["initial_reserves"] * 0.1
         self._loans: dict[int, float] = {}  # 记录本银行的贷款明细（borrower_id → loan_amount），修复越界问题
 
+        # ── BalanceSheet 同步 ─────────────────────────
+        self._bs = BalanceSheet()
+        self._bs.reserves = self.reserves
+        self._bs.loans_outstanding = self.total_loans
+        self._bs.deposits = self.deposits
+
     def _effective_rate(self, borrower: Agent) -> float:
         """
         差异化利率 = 基准利率 + 信用利差 + 银行风险偏好
@@ -1502,6 +1601,9 @@ class Bank(Agent):
                 # 2. 储户现金增加（利息收入）
                 d.cash += share
                 # 资金守恒：银行准备金↓ = 储户现金↑ ✓
+
+        # 同步 BalanceSheet
+        self._bs.reserves = self.reserves
 
     def lend(self) -> None:
         """
@@ -1583,6 +1685,10 @@ class Bank(Agent):
             
             # 4. 借款人负债端：增加贷款债务
             b.loan_principal = existing + amount
+
+            # 同步 BalanceSheet
+            self._bs.reserves = self.reserves
+            self._bs.loans_outstanding = self.total_loans
             if not hasattr(b, 'creditor_bank') or not b.creditor_bank:
                 b.creditor_bank = set()
             b.creditor_bank.add(id(self))  # 记录债主银行
@@ -1617,6 +1723,10 @@ class Bank(Agent):
         """银行财富 = 准备金 + 有效贷款 - 坏账"""
         effective_loans = max(0.0, self.total_loans - self.bad_debts)
         self.wealth = self.reserves + effective_loans
+        # 同步 BalanceSheet
+        self._bs.reserves = self.reserves
+        self._bs.loans_outstanding = self.total_loans
+        self._bs.deposits = self.deposits
 
     def step(self) -> None:
         self._auto_adjust_rates()
@@ -1700,6 +1810,11 @@ class Trader(Agent):
         self.bid_ask_spread: float = 0.02
         self.wealth: float = self.cash + self.shares * model.stock_price
         self.realized_gains: float = 0.0   # 已实现收益（用于正确计算财富）
+
+        # ── BalanceSheet 同步 ─────────────────────────
+        self._bs = BalanceSheet()
+        self._bs.cash = self.cash
+        self._bs.stocks_value = self.shares * model.stock_price
 
     def _update_momentum(self, price: float, prev: float) -> None:
         if prev <= 0:
@@ -1819,6 +1934,9 @@ class Trader(Agent):
 
     def update_wealth(self) -> None:
         self.wealth = self.cash + self.shares * self.model.stock_price
+        # 同步 BalanceSheet
+        self._bs.cash = self.cash
+        self._bs.stocks_value = self.shares * self.model.stock_price
 
     def step(self) -> None:
         self.trade()
