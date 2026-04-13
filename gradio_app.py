@@ -114,6 +114,7 @@ def _play_loop():
 # ── matplotlib 图表生成 ──────────────────────────────────────────
 def _make_fig(hist_data: list) -> plt.Figure:
     """生成 6 格宏观指标图表（直接返回 Figure 给 gr.Plot）。"""
+    plt.close("all")
     fig = plt.figure(figsize=(12, 7), facecolor="#f8fafc")
     gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.35)
 
@@ -153,6 +154,7 @@ def _make_fig(hist_data: list) -> plt.Figure:
 
 def _make_city_fig(hist_data: list) -> plt.Figure:
     """双城 GDP + 失业率对比图。"""
+    plt.close("all")
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3), facecolor="#f8fafc")
     cycles = [e["cycle"] for e in hist_data]
 
