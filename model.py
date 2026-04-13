@@ -2124,13 +2124,33 @@ class Firm(Agent):
             bank.reserves -= loan
 
     def repay_loan(self) -> None:
-        """偿还贷款 + 违约判定"""
+        """
+        偿还贷款 + 违约判定（修复负现金漏洞）
+        
+        Bug 修复：原代码 repayment = min(interest + 5, self.cash)
+        当 self.cash 为负时，repayment 变为负数，导致 cash -= 负数 = 现金增加。
+        """
         if self.loan_principal <= 0:
             return
+        
+        # 修复：现金为负时不能还款
+        if self.cash <= 0:
+            if self.random.random() < self.default_probability:
+                self._trigger_default()
+            return
+        
         rate = self.model.base_interest_rate
         interest = self.loan_principal * rate * 0.1
-        repayment = min(interest + 5, self.cash)
-
+        
+        # 应还 = 利息 + 部分本金
+        target_repayment = interest + 5
+        # 实际还款 = min(目标, 现金)，确保非负
+        repayment = min(target_repayment, self.cash)
+        repayment = max(0, repayment)
+        
+        if repayment <= 0:
+            return
+        
         if self.cash >= repayment:
             self.cash -= repayment
             self.loan_principal -= max(0.0, repayment - interest)
@@ -2311,17 +2331,52 @@ class Bank(Agent):
         return base + self.lending_spread + score_penalty
 
     def pay_deposit_interest(self) -> None:
-        """支付存款利息（从储备中扣除）"""
+        """
+        支付存款利息（复式簿记）：
+          - 银行资产端：准备金减少
+          - 银行负债端：存款不变（利息已支付）
+          - 储户资产端：现金增加（利息收入）
+          
+        资金守恒：利息从银行准备金流向储户现金，系统内现金总量不变。
+        """
+        if self.deposits <= 0:
+            return
+            
         rate = self.model.base_interest_rate * 0.5  # 存款利率通常低于基准
-        interest = self.deposits * rate
-        self.reserves -= interest
+        total_interest = self.deposits * rate
+        
+        # 确保银行有足够的准备金支付利息
+        total_interest = min(total_interest, self.reserves * 0.1)  # 最多支付准备金的10%
+        if total_interest <= 0:
+            return
+        
+        # 按存款比例分配给储户
+        depositors = list(self.model.households) + list(self.model.firms)
+        total_deposits = sum(getattr(d, 'cash', 0) for d in depositors)  # 简化：现金=存款
+        
+        if total_deposits <= 0:
+            return
+        
+        for d in depositors:
+            deposit = getattr(d, 'cash', 0)
+            if deposit > 0:
+                share = (deposit / total_deposits) * total_interest
+                # 复式簿记：
+                # 1. 银行准备金减少
+                self.reserves -= share
+                # 2. 储户现金增加（利息收入）
+                d.cash += share
+                # 资金守恒：银行准备金↓ = 储户现金↑ ✓
 
     def lend(self) -> None:
         """
-        差异化放贷：
-          - 按信用评分筛选
-          - 按风险偏好决定规模
-          - 资本金充足率合规检查（巴塞尔协议）
+        复式簿记放贷：
+          - 银行资产端：+贷款债权（对借款人）
+          - 银行负债端：-准备金（现金减少）
+          - 借款人资产端：+现金
+          - 借款人负债端：+贷款债务
+          
+        资金守恒：系统内现金总量不变，只是从银行准备金转移到借款人手中。
         """
         if self.reserves <= 50:
             return
@@ -2330,9 +2385,30 @@ class Bank(Agent):
         capital_ratio = self.capital / max(1.0, self.total_loans)
         if capital_ratio < 0.08:
             # 低于8%：强制收缩（巴塞尔III）
-            shrink = self.loan_amount * 0.3
-            self.reserves += shrink
-            self.total_loans -= shrink
+            # 收回部分贷款（从有现金的借款人那里）
+            for borrower_id, loan_amount in list(self._loans.items()):
+                if loan_amount <= 0:
+                    continue
+                # 找到借款人
+                borrower = None
+                for h in self.model.households:
+                    if id(h) == borrower_id:
+                        borrower = h
+                        break
+                if not borrower:
+                    for f in self.model.firms:
+                        if id(f) == borrower_id:
+                            borrower = f
+                            break
+                if borrower and borrower.cash >= loan_amount * 0.3:
+                    # 提前收回30%
+                    repay = loan_amount * 0.3
+                    borrower.cash -= repay
+                    borrower.loan_principal -= repay
+                    self._loans[borrower_id] -= repay
+                    self.reserves += repay
+                    self.total_loans -= repay
+                    self.model.total_loans_outstanding -= repay
             return
 
         borrowers = list(self.model.households) + list(self.model.firms)
@@ -2358,15 +2434,26 @@ class Bank(Agent):
             if amount <= 0:
                 continue
 
+            # ═══ 复式簿记：贷款创造存款 ═══
+            # 1. 银行资产端：增加贷款债权（对借款人的债权）
+            self._loans[id(b)] = self._loans.get(id(b), 0) + amount
+            self.total_loans += amount
+            self.model.total_loans_outstanding += amount
+            
+            # 2. 银行负债端：减少准备金（现金流出）
+            self.reserves -= amount
+            
+            # 3. 借款人资产端：增加现金
             b.cash += amount
+            
+            # 4. 借款人负债端：增加贷款债务
             b.loan_principal = existing + amount
             if not hasattr(b, 'creditor_bank') or not b.creditor_bank:
                 b.creditor_bank = set()
             b.creditor_bank.add(id(self))  # 记录债主银行
-            self._loans[id(b)] = amount
-            self.reserves -= amount
-            self.total_loans += amount
-            self.model.total_loans_outstanding += amount
+            
+            # 资金守恒验证：系统内现金总量不变
+            # 银行准备金减少 = 借款人现金增加 ✓
 
     def update_bad_debts(self) -> None:
         """

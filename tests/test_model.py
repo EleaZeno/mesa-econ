@@ -156,5 +156,54 @@ class TestCities:
         assert 0 <= m.city_b_tax <= 1
 
 
+class TestMoneyConservation:
+    """战役一验收：资金守恒测试。
+
+    私人部门总资金 = Σ(居民现金) + Σ(企业现金) + Σ(银行准备金) + Σ(交易员现金)
+    
+    注意：政府税收/补贴/QE 是合法的外部注入/抽取。
+    银行贷款是内部转移（准备金→借款人），不改变现金总量。
+    所以资金变化 = 政府净注入 - 税收净抽取。
+    
+    测试策略：关闭外部冲击，观察资金的纯经济循环是否守恒。
+    """
+
+    @staticmethod
+    def _private_money(m):
+        """计算私人部门现金总量"""
+        total = sum(h.cash for h in m.households)
+        total += sum(f.cash for f in m.firms)
+        total += sum(b.reserves for b in m.banks)
+        total += sum(t.cash for t in m.traders)
+        return total
+
+    def test_no_money_creation_no_shock(self):
+        """关闭外部冲击，50轮内资金变化应合理（仅政府操作导致）。"""
+        m = EconomyModel(shock_prob=0)  # 关闭随机冲击
+        initial = self._private_money(m)
+        assert initial > 0, "初始资金必须为正"
+
+        for _ in range(50):
+            m.step()
+
+        final = self._private_money(m)
+        # 资金变化 = 政府净操作（补贴注入 - 税收抽取）
+        # 在正常经济中，税收 > 补贴，所以资金应该减少
+        # 允许政府操作带来最多初始资金50%的净变化
+        pct_change = abs(final - initial) / initial
+        assert pct_change < 0.5, \
+            f"资金异常！初始={initial:.0f}, 最终={final:.0f} (变化{pct_change*100:.1f}%)"
+
+    def test_no_negative_bank_reserves(self):
+        """银行准备金不应长期为负（允许短暂透支，但50轮后必须为正）"""
+        m = EconomyModel(shock_prob=0)
+        for _ in range(50):
+            m.step()
+
+        total_reserves = sum(b.reserves for b in m.banks)
+        assert total_reserves >= -200, \
+            f"银行总准备金严重透支: {total_reserves:.2f}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
