@@ -1,6 +1,6 @@
 """
-经济沙盘 v3.6 — Gradio 重写版
-消灭 app.py 的 HTML 拼接屎山，用 Gradio Blocks 声明式 UI。
+经济沙盘 v4.0 — Gradio 重写版
+所有价格信号（工资/利率/商品价格）Agent 自主博弈涌现，无全局硬编码。
 
 Run: python gradio_app.py
 """
@@ -40,7 +40,7 @@ def _init(**kw):
     global _md, _run, _thr
     d = dict(
         n_households=25, n_firms=12, n_traders=20,
-        tax_rate=0.15, base_interest_rate=0.05, min_wage=7.0,
+        tax_rate=0.15,
         productivity=1.0, subsidy=0.0, gov_purchase=0.0,
         capital_gains_tax=0.10, shock_prob=0.02,
     )
@@ -79,6 +79,15 @@ def _rec():
                 "gini": round(m.gini, 3),
                 "rate": round(emp / nh * 100 if nh else 0, 1),
                 "score": round(getattr(m, "health_score", 50)),
+                "nfirms": len(m.firms),
+                "mkt_rate": round(
+                    sum(b.loan_rate + b.lending_spread for b in m.banks)
+                    / max(1, len(m.banks)) * 100, 2
+                ) if m.banks else 0,
+                "avg_deposit_rate": round(
+                    sum(b.deposit_rate for b in m.banks)
+                    / max(1, len(m.banks)) * 100, 2
+                ) if m.banks else 0,
                 "ca_pop": getattr(m, "city_a_pop", 0),
                 "cb_pop": getattr(m, "city_b_pop", 0),
                 "ca_gdp": round(getattr(m, "city_a_gdp", 0)),
@@ -112,8 +121,8 @@ def _make_fig(hist_data: list) -> plt.Figure:
         ("GDP", "gdp", "#3b82f6"),
         ("失业率 (%)", "unemp", "#f59e0b"),
         ("Gini 系数", "gini", "#8b5cf6"),
-        ("股价", "stock", "#10b981"),
-        ("就业率 (%)", "rate", "#22c55e"),
+        ("企业数量", "nfirms", "#10b981"),
+        ("市场利率 (%)", "mkt_rate", "#f97316"),
         ("银行坏账率 (%)", "bdr", "#ef4444"),
     ]
 
@@ -179,27 +188,21 @@ def _snapshot():
         last = hist[-1]
         score = last.get("score", 50)
         score_color = "#16a34a" if score >= 80 else "#f59e0b" if score >= 40 else "#ef4444"
-        # 计算市场利率（银行加权平均）
-        mkt_rate = "--"
-        with _lock:
-            if _md and _md.banks:
-                rates = [_md.base_interest_rate + b.lending_spread for b in _md.banks]
-                mkt_rate = f"{sum(rates)/len(rates)*100:.1f}%"
         stats_md = (
-            f"## 经济沙盘 v3.7 &nbsp;&nbsp;"
+            f"## 经济沙盘 v4.0 &nbsp;&nbsp;"
             f"<span style='color:{score_color};font-size:28px;font-weight:800'>{score}</span>"
             f"<span style='color:#94a3b8;font-size:12px'> 健康分</span>\n\n"
             f"**第 {last['cycle']} 轮** &nbsp;|&nbsp; "
             f"GDP = **{last['gdp']:,}** &nbsp;|&nbsp; "
             f"基尼 = **{last['gini']:.3f}** &nbsp;|&nbsp; "
-            f"股价 = **{last['stock']:.1f}** &nbsp;|&nbsp; "
+            f"企业 = **{last['nfirms']}** &nbsp;|&nbsp; "
             f"失业率 = **{last['unemp']:.1f}%** &nbsp;|&nbsp; "
-            f"市场利率 ≈ **{mkt_rate}** *(内生化)*\n\n"
+            f"市场利率 ≈ **{last['mkt_rate']:.1f}%** *(涌现)*\n\n"
             f"🏙️ A城 {last['ca_pop']}人 GDP={last['ca_gdp']:,} 失业{last['ca_unemp']:.1f}% &nbsp;&nbsp;"
             f"🌆 B城 {last['cb_pop']}人 GDP={last['cb_gdp']:,} 失业{last['cb_unemp']:.1f}%"
         )
     else:
-        stats_md = "## 经济沙盘 v3.6\n\n*仿真未开始，点击「单步」或「开始」*"
+        stats_md = "## 经济沙盘 v4.0\n\n*仿真未开始，点击「单步」或「开始」*"
 
     macro_fig = _make_fig(hist)
     city_fig = _make_city_fig(hist)
@@ -239,10 +242,9 @@ def cb_apply(tax, prod, gov, sub, cg, cat, cbt):
     with _lock:
         if _md:
             _md.tax_rate = tax / 100
-            _md.min_wage = 7.0  # 固定最低工资（未来可内生化）
             _md.productivity = prod
             _md.gov_purchase = gov
-            _md.subsidy_rate = sub
+            _md.subsidy = sub
             _md.capital_gains_tax = cg / 100
             _md.city_a_tax = cat / 100
             _md.city_b_tax = cbt / 100
@@ -266,11 +268,11 @@ def cb_poll():
 
 # ── Gradio Blocks UI ─────────────────────────────────────────────
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="经济沙盘 v3.7") as demo:
+    with gr.Blocks(title="经济沙盘 v4.0") as demo:
 
         # ── 顶部状态栏 ──────────────────────────────────────────
         stats_md = gr.Markdown(
-            "## 经济沙盘 v3.6\n\n*初始化中...*",
+            "## 经济沙盘 v4.0\n\n*初始化中...*",
             elem_classes=["stat-header"],
         )
 
