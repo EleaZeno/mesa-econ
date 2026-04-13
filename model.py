@@ -1722,25 +1722,45 @@ class Household(Agent):
 
     def consume(self) -> None:
         """
-        差异化消费：按MPC决定是否消费
-        高MPC（低收入）：几乎必定消费（生存型）
-        低MPC（高收入）：消费概率低（储蓄/投资型）
-        消费时同步从有库存的企业扣减库存，闭环商品市场。
+        搜寻匹配消费（替代随机选择）：
+        
+        1. 消费意愿由 MPC 决定
+        2. 消费者随机搜寻最多3家有库存的企业
+        3. 选择最低价的企业购买
+        4. 搜寻成本：看的企业越多，买到最优价的概率越高，但耗时
         """
         if self.goods <= 0:
             return
+
         consume_prob = min(0.98, self.mpc + self.random.uniform(-0.05, 0.05))
-        if self.random.random() < consume_prob:
-            self.goods -= 1
-            # 随机选择一家有库存的企业，扣其库存、加其营收，闭环商品市场
-            firms_with_stock = self.model._cache.get('firms_with_stock', [])
-            if firms_with_stock:
-                f = self.random.choice(firms_with_stock)
-                f.inventory -= 1
-                tax = f.price * self.model.tax_rate
-                after_tax = f.price * (1 - self.model.tax_rate)
-                f.cash += after_tax
-                self.model.govt_revenue += tax  # 税收归集，修复泄漏
+        if self.random.random() >= consume_prob:
+            return
+
+        # 搜寻匹配：从有库存企业中随机抽样最多3家
+        firms_with_stock = self.model._cache.get('firms_with_stock', [])
+        if not firms_with_stock:
+            return
+
+        n_search = min(3, len(firms_with_stock))
+        candidates = self.random.sample(firms_with_stock, n_search) \
+            if n_search < len(firms_with_stock) else list(firms_with_stock)
+
+        # 选最低价
+        best_firm = min(candidates, key=lambda f: f.price)
+
+        # 复式簿记：
+        # 1. 消费者库存-1
+        self.goods -= 1
+        # 2. 企业库存-1
+        best_firm.inventory -= 1
+        # 3. 现金流：消费者支付 → 企业收入 → 政府税收
+        tax = best_firm.price * self.model.tax_rate
+        after_tax = best_firm.price * (1 - self.model.tax_rate)
+        best_firm.cash += after_tax
+        self.model.govt_revenue += tax
+
+        # 搜寻反馈：低价企业获得更多客户 → 激励竞争性定价
+        # （无需额外代码，min() 自然实现）
 
     def invest(self) -> None:
         """股票投资：风险厌恶决定是否参与股市"""
@@ -1992,37 +2012,68 @@ class Firm(Agent):
 
     def price_goods(self) -> None:
         """
-        差异化定价 + 价格粘性：
-
-        1. 计算目标价格（基于边际成本 + 目标毛利率）
-        2. 价格粘性：仅 price_stickiness 比例的企业会调价
-        3. 伯特兰竞争：参考竞争对手平均价格
+        内生定价（废除全局 avg_price 依赖）：
+        
+        纯粹基于自身微观信号：
+        1. 边际成本锚底：cost_per_unit = capital_intensity × min_wage × 0.5
+        2. 库存去化率驱动：
+           - 去化率 < 20% → 降价（需求不足）
+           - 去化率 > 70% → 涨价（供不应求）
+           - 中间 → 微调向边际成本靠拢
+        3. 价格粘性：仅 price_stickiness 比例企业调价
+        4. 竞争参考：同行业竞品均价（不使用全局 avg_price）
         """
         if self.price_change_cooldown > 0:
             self.price_change_cooldown -= 1
             return
 
-        # 价格粘性：仅部分企业每轮调价
+        # 价格粘性
         if self.random.random() > DEFAULTS["price_stickiness"]:
             return
 
-        competitors = [f for f in self.model._cache.get('firms_by_industry', {}).get(self.industry, []) if f is not self]
-        avg_competitor_price = np.mean([f.price for f in competitors]) if competitors else self.model.avg_price
-
-        # 目标价格：库存多→降价去库存；库存少→涨价
+        # 边际成本
         cost_per_unit = self._ind["capital_intensity"] * self.model.min_wage * 0.5
-        if self.inventory > 15:
-            # 去库存：价格下浮最多20%
-            self.price = max(cost_per_unit, avg_competitor_price * 0.90)
-        elif self.inventory < 3:
-            # 供不应求：价格上浮最多15%
-            self.price = avg_competitor_price * 1.10
-        else:
-            # 正常：向竞争对手均价靠拢
-            self.price = 0.5 * self.price + 0.5 * avg_competitor_price
+        cost_per_unit = max(cost_per_unit, 1.0)
 
-        self.price = max(1.0, self.price)
-        # 调价后进入冷却期（模拟菜单成本）
+        # 库存去化率（本轮卖了多少 / 总库存+产量）
+        total_supply = self.inventory + max(0, self.production)
+        if total_supply > 0:
+            sell_rate = max(0, total_supply - self.inventory) / total_supply
+        else:
+            sell_rate = 0.5  # 无数据时中性
+
+        # 基于去化率的定价决策
+        if sell_rate < 0.20:
+            # 需求严重不足 → 大幅降价去库存
+            target = cost_per_unit * 0.75
+        elif sell_rate < 0.40:
+            # 需求偏弱 → 小幅降价
+            target = cost_per_unit * 0.90
+        elif sell_rate > 0.80:
+            # 供不应求 → 涨价
+            target = cost_per_unit * 1.25
+        elif sell_rate > 0.65:
+            # 需求偏强 → 小幅涨价
+            target = cost_per_unit * 1.12
+        else:
+            # 中性 → 靠拢边际成本
+            target = cost_per_unit * 1.02
+
+        # 竞争参考（仅同行业，不使用全局 avg_price）
+        industry_firms = [
+            f for f in self.model._cache.get('firms_by_industry', {}).get(self.industry, [])
+            if f is not self and hasattr(f, 'price') and f.price > 0
+        ]
+        if industry_firms:
+            avg_peer = np.mean([f.price for f in industry_firms])
+            # 混合自身信号(60%) + 同行信号(40%)
+            target = 0.6 * target + 0.4 * avg_peer
+
+        # 价格粘性调整：不直接跳到目标价，而是部分靠拢
+        self.price = 0.7 * self.price + 0.3 * target
+        self.price = max(cost_per_unit * 0.5, self.price)  # 保底：不低于边际成本一半
+
+        # 调价冷却期
         self.price_change_cooldown = self.random.randint(1, 3)
 
     def sell_goods(self) -> None:
@@ -2484,10 +2535,58 @@ class Bank(Agent):
         self.wealth = self.reserves + effective_loans
 
     def step(self) -> None:
+        self._auto_adjust_rates()
         self.pay_deposit_interest()
         self.lend()
         self.update_bad_debts()
         self.update_wealth()
+
+    def _auto_adjust_rates(self) -> None:
+        """
+        内生化利率调整：
+        
+        核心逻辑：银行根据自身资产负债表状况自动调整 lending_spread。
+        - 准备金充裕（reserve_ratio > 0.3）→ 降息放贷（spread 收窄）
+        - 准备金紧张（reserve_ratio < 0.1）→ 加息吸储（spread 扩大）
+        - 坏账率高 → 加息补偿风险
+        
+        这样 base_interest_rate 退化为"央行政策利率"背景值，
+        实际贷款利率由各银行根据自身状况动态决定。
+        """
+        # 准备金率 = 准备金 / 总资产（准备金+贷款）
+        total_assets = self.reserves + self.total_loans
+        if total_assets <= 0:
+            reserve_ratio = 1.0  # 无资产时默认充裕
+        else:
+            reserve_ratio = self.reserves / total_assets
+
+        # 坏账率
+        bad_debt_ratio = self.bad_debts / max(1.0, self.total_loans)
+
+        # 基准 spread（来自银行类型）
+        base_spread = BANK_PARAMS[self.bank_type]["lending_spread"]
+
+        # ── 动态调整 ──
+        target_spread = base_spread
+
+        # 1. 准备金压力：准备金率越低，spread 越高
+        if reserve_ratio < 0.10:
+            target_spread += 0.03  # 紧张：加息3%
+        elif reserve_ratio < 0.20:
+            target_spread += 0.01  # 偏紧：加息1%
+        elif reserve_ratio > 0.50:
+            target_spread -= 0.015  # 充裕：降息1.5%
+
+        # 2. 坏账补偿：坏账率越高，spread 越高
+        if bad_debt_ratio > 0.20:
+            target_spread += 0.02
+        elif bad_debt_ratio > 0.10:
+            target_spread += 0.01
+
+        # 3. 平滑过渡（不跳变）
+        self.lending_spread = 0.7 * self.lending_spread + 0.3 * target_spread
+        # 限制范围 [0.5%, 10%]
+        self.lending_spread = max(0.005, min(0.10, self.lending_spread))
 
 
 class Trader(Agent):

@@ -179,8 +179,14 @@ def _snapshot():
         last = hist[-1]
         score = last.get("score", 50)
         score_color = "#16a34a" if score >= 80 else "#f59e0b" if score >= 40 else "#ef4444"
+        # 计算市场利率（银行加权平均）
+        mkt_rate = "--"
+        with _lock:
+            if _md and _md.banks:
+                rates = [_md.base_interest_rate + b.lending_spread for b in _md.banks]
+                mkt_rate = f"{sum(rates)/len(rates)*100:.1f}%"
         stats_md = (
-            f"## 经济沙盘 v3.6 &nbsp;&nbsp;"
+            f"## 经济沙盘 v3.7 &nbsp;&nbsp;"
             f"<span style='color:{score_color};font-size:28px;font-weight:800'>{score}</span>"
             f"<span style='color:#94a3b8;font-size:12px'> 健康分</span>\n\n"
             f"**第 {last['cycle']} 轮** &nbsp;|&nbsp; "
@@ -188,7 +194,7 @@ def _snapshot():
             f"基尼 = **{last['gini']:.3f}** &nbsp;|&nbsp; "
             f"股价 = **{last['stock']:.1f}** &nbsp;|&nbsp; "
             f"失业率 = **{last['unemp']:.1f}%** &nbsp;|&nbsp; "
-            f"政府收入 = **{last['rev']:,}**\n\n"
+            f"市场利率 ≈ **{mkt_rate}** *(内生化)*\n\n"
             f"🏙️ A城 {last['ca_pop']}人 GDP={last['ca_gdp']:,} 失业{last['ca_unemp']:.1f}% &nbsp;&nbsp;"
             f"🌆 B城 {last['cb_pop']}人 GDP={last['cb_gdp']:,} 失业{last['cb_unemp']:.1f}%"
         )
@@ -229,12 +235,11 @@ def cb_reset():
     return ("▶ 开始",) + _snapshot()
 
 
-def cb_apply(tax, ir, mw, prod, gov, sub, cg, cat, cbt):
+def cb_apply(tax, prod, gov, sub, cg, cat, cbt):
     with _lock:
         if _md:
             _md.tax_rate = tax / 100
-            _md.base_interest_rate = ir / 100
-            _md.min_wage = mw
+            _md.min_wage = 7.0  # 固定最低工资（未来可内生化）
             _md.productivity = prod
             _md.gov_purchase = gov
             _md.subsidy_rate = sub
@@ -261,7 +266,7 @@ def cb_poll():
 
 # ── Gradio Blocks UI ─────────────────────────────────────────────
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="经济沙盘 v3.6") as demo:
+    with gr.Blocks(title="经济沙盘 v3.7") as demo:
 
         # ── 顶部状态栏 ──────────────────────────────────────────
         stats_md = gr.Markdown(
@@ -277,8 +282,6 @@ def build_ui() -> gr.Blocks:
                 gr.Markdown("### 经济参数")
 
                 sl_tax = gr.Slider(5, 30, value=15, step=1, label="税率 (%)")
-                sl_ir = gr.Slider(1, 15, value=5, step=0.5, label="基准利率 (%)")
-                sl_mw = gr.Slider(5, 15, value=7, step=0.5, label="最低工资")
                 sl_prod = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="生产率")
                 sl_gov = gr.Slider(0, 500, value=0, step=10, label="政府购买")
                 sl_sub = gr.Slider(0, 100, value=0, step=5, label="补贴")
@@ -288,7 +291,7 @@ def build_ui() -> gr.Blocks:
                 sl_cat = gr.Slider(5, 30, value=12, step=1, label="城市 A 税率 (%)")
                 sl_cbt = gr.Slider(5, 30, value=18, step=1, label="城市 B 税率 (%)")
 
-                all_sliders = [sl_tax, sl_ir, sl_mw, sl_prod, sl_gov, sl_sub, sl_cg, sl_cat, sl_cbt]
+                all_sliders = [sl_tax, sl_prod, sl_gov, sl_sub, sl_cg, sl_cat, sl_cbt]
 
                 gr.Markdown("### 控制")
                 with gr.Row():
