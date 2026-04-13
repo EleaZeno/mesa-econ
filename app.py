@@ -826,5 +826,5 @@ def _play_loop():
 
 if __name__ == "__main__":
     init()
-    print("经济沙盘 v3.3: http://127.0.0.1:8523")
+    print("经济沙盘 v3.5: http://127.0.0.1:8523")
     app.run(host="0.0.0.0", port=8523, debug=False, threaded=True)

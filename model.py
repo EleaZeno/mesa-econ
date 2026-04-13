@@ -1,5 +1,5 @@
 """
-Mesa 经济沙盘 - 核心模型 v3.0
+Mesa 经济沙盘 - 核心模型 v3.5
 基于 FRB/US · NAWM · ABCE 框架设计思路
 
 v3.0 核心升级：
@@ -449,8 +449,10 @@ class Household(Agent):
             if firms_with_stock:
                 f = self.random.choice(firms_with_stock)
                 f.inventory -= 1
+                tax = f.price * self.model.tax_rate
                 after_tax = f.price * (1 - self.model.tax_rate)
                 f.cash += after_tax
+                self.model.govt_revenue += tax  # 税收归集，修复泄漏
 
     def invest(self) -> None:
         """股票投资：风险厌恶决定是否参与股市"""
@@ -736,8 +738,10 @@ class Firm(Agent):
             if h.cash >= self.price and h.goods < 10 and self.inventory > 0:
                 h.cash -= self.price
                 h.goods += 1
+                tax = self.price * self.model.tax_rate
                 after_tax = self.price * (1 - self.model.tax_rate)
                 self.cash += after_tax
+                self.model.govt_revenue += tax  # 税收归集，修复泄漏
                 self.inventory -= 1
                 # 城际贸易：企业与消费者不在同一城市
                 if h.city != self.city:
@@ -992,6 +996,7 @@ class Bank(Agent):
         self.wealth: float = self.reserves
         # 资本金（用于巴塞尔协议）
         self.capital: float = bp["initial_reserves"] * 0.1
+        self._loans: dict[int, float] = {}  # 记录本银行的贷款明细（borrower_id → loan_amount），修复越界问题
 
     def _effective_rate(self, borrower: Agent) -> float:
         """
@@ -1055,19 +1060,32 @@ class Bank(Agent):
 
             b.cash += amount
             b.loan_principal = existing + amount
+            if not hasattr(b, 'creditor_bank') or not b.creditor_bank:
+                b.creditor_bank = set()
+            b.creditor_bank.add(id(self))  # 记录债主银行
+            self._loans[id(b)] = amount
             self.reserves -= amount
             self.total_loans += amount
             self.model.total_loans_outstanding += amount
 
     def update_bad_debts(self) -> None:
         """
-        坏账 = Σ(企业违约概率 × 企业贷款额 × 损失率)
+        坏账 = Σ(本银行债务人违约概率 × 本银行对其贷款额 × 损失率)
+        修复：只统计自己发放的贷款，不越界统计其他银行的贷款
         """
         total = 0.0
-        for f in self.model.firms:
-            prob = getattr(f, "default_probability", 0.0)
-            loan = getattr(f, "loan_principal", 0.0)
-            total += prob * loan * DEFAULTS["default_loss_rate"]
+        for borrower_id, loan_principal in list(self._loans.items()):
+            # 从模型中查找对应债务人
+            borrower = next(
+                (a for a in list(self.model.households) + list(self.model.firms)
+                 if id(a) == borrower_id), None
+            )
+            if borrower is None:
+                # 债务人已消失（破产），全额计坏账
+                total += loan_principal * DEFAULTS["default_loss_rate"]
+            else:
+                prob = getattr(borrower, "default_probability", 0.0)
+                total += prob * loan_principal * DEFAULTS["default_loss_rate"]
         self.bad_debts = total
 
         # 更新资本金（利润留存）
@@ -1246,9 +1264,10 @@ def compute_gdp(model: EconomyModel) -> float:
     # 消费 C
     consumption = sum(h.goods * model.avg_price for h in households)
 
-    # 投资 I（企业生产 + R&D + 资本形成）
+    # 投资 I = 库存净变动（已生产未出售的部分）+ R&D + 资本折旧
+    # 注：不用 f.production * f.price（与 consumption 的 h.goods * price 重复）
     investment = sum(
-        f.production * f.price + f.rnd_investment + f.capital_stock * 0.02
+        f.inventory * f.price + f.rnd_investment + f.capital_stock * 0.02
         for f in firms
     )
 
@@ -1322,7 +1341,8 @@ class EconomyModel(Model):
 
         # ── 信贷市场 ───────────────────────────────────────
         self.total_loans_outstanding: float = 0.0
-        self.total_dividends: float = 0.0
+        self.total_dividends: float = 0.0        # 单轮分红（每轮重置）
+        self.all_dividends: float = 0.0          # 全量累计（永不清零，用于 Gordon 模型）
 
         # ── 宏观指标 ───────────────────────────────────────
         self.gdp: float = 0.0
@@ -1475,8 +1495,9 @@ class EconomyModel(Model):
     def _reset_counters(self) -> None:
         self.buy_orders = 0
         self.sell_orders = 0
+        self.all_dividends += self.total_dividends  # 累计前先加上旧值
+        self.total_dividends = 0.0        # 单轮重置
         self.govt_revenue = 0.0
-        self.total_dividends = 0.0
         self.default_count = 0
         self.capital_gains_tax_revenue = 0.0
 
@@ -1587,11 +1608,11 @@ class EconomyModel(Model):
         # ── 股市：戈登模型锚 + 供需扰动 + 系统风险 ─────────
         self.prev_stock_price = self.stock_price
 
-        # 戈登模型内在价值（修复维度错配）：
-        # total_dividends = 累积每轮总额（5轮 = 5×单轮）
-        # 需除以周期数 + 乘以年化系数（≈12）得到年度股息
+        # 戈登模型内在价值
+        # 用截至本轮末的完整累计值 = 上轮累加值 + 本轮值
         cycles_per_year = 12
-        avg_div_per_cycle = _safe_div(self.total_dividends, max(1, self.cycle + 1), 0.0)
+        total_sofar = self.all_dividends + self.total_dividends
+        avg_div_per_cycle = _safe_div(total_sofar, max(1, self.cycle + 1), 0.0)
         avg_div_annual = avg_div_per_cycle * cycles_per_year  # 年化股息
         avg_shares = max(1, len(self.firms) * 50)
         div_per_share_annual = avg_div_annual / avg_shares
