@@ -382,6 +382,7 @@ class Household(Agent):
         self.employer: Optional["Firm"] = None
         self.loan_principal: float = 0.0
         self.shares_owned: int = 0
+        self.cost_basis: float = 0.0   # 持股成本（移动平均买入价），用于计算资本利得
         self.wealth: float = self.cash
         # 信用评分：初始基于技能水平（高技能→高信用）
         self.credit_score: float = 500 + self.skill_level * 100
@@ -460,16 +461,29 @@ class Household(Agent):
         # 风险厌恶高→几乎不参与
         if self.random.random() > (1 - self.risk_aversion) * 0.5 + 0.1:
             return
-        # 买入
+        # 买入（移动平均成本基准）
         if self.cash >= price * 2 and self.random.random() < self.stock_buy_prob:
-            self.cash -= price * 2
-            self.shares_owned += 2
-            self.model.buy_orders += 2
-        # 卖出（保留部分仓位）
+            shares_bought = 2
+            cost = price * shares_bought
+            self.cash -= cost
+            # 更新移动平均成本
+            total_cost = self.cost_basis * self.shares_owned + cost
+            self.shares_owned += shares_bought
+            self.cost_basis = total_cost / self.shares_owned if self.shares_owned > 0 else 0.0
+            self.model.buy_orders += shares_bought
+        # 卖出（资本利得税）
         elif self.shares_owned > 1 and self.random.random() < self.stock_sell_prob:
-            self.cash += price * 0.95
-            self.model.sell_orders += 1
-            self.shares_owned -= 1
+            shares_sold = 1
+            proceeds = price * shares_sold
+            cost = self.cost_basis * shares_sold
+            capital_gain = max(0.0, proceeds - cost)
+            tax = capital_gain * self.model.capital_gains_tax
+            self.cash += proceeds - tax
+            self.model.govt_revenue += tax
+            self.model.capital_gains_tax_revenue += tax
+            self.shares_owned -= shares_sold
+            # 成本基准不变（平均成本法）
+            self.model.sell_orders += shares_sold
 
     def search_job(self) -> None:
         """找工作（摩擦性失业：消耗现金）"""
@@ -1122,12 +1136,14 @@ class Trader(Agent):
         self.strategy = _draw_trader_strategy(self.random)
         self.cash: float = self.random.uniform(300, 1000)
         self.shares: int = self.random.randint(0, 20)
+        self.cost_basis: float = float(model.stock_price)  # 移动平均成本基准
         self.momentum: float = 0.0
         # 价值投资者：持有对内在价值的估计
         self.intrinsic_value_estimate: float = model.stock_price
         # 做市商：买卖价差
         self.bid_ask_spread: float = 0.02
         self.wealth: float = self.cash + self.shares * model.stock_price
+        self.realized_gains: float = 0.0   # 已实现收益（用于正确计算财富）
 
     def _update_momentum(self, price: float, prev: float) -> None:
         if prev <= 0:
@@ -1150,20 +1166,20 @@ class Trader(Agent):
         sell_prob = _clamp(0.3 - self.momentum * 2.5, 0.0, 1.0)
 
         if self.cash >= price * 2 and self.random.random() < buy_prob:
-            self.cash -= price * 2
+            cost = price * 2
+            self.cash -= cost
+            # 移动平均成本基准
+            old_cost = self.cost_basis * self.shares
             self.shares += 2
+            self.cost_basis = (old_cost + cost) / self.shares
             m.buy_orders += 2
 
-        # 止损
+        # 止损（全卖）
         prev = m.prev_stock_price
         if prev > 0 and (prev - price) / prev > 0.05 and self.shares > 0:
-            m.sell_orders += self.shares
-            self.cash += price * self.shares
-            self.shares = 0
+            self._sell(self.shares, price)
         elif self.shares > 0 and self.random.random() < sell_prob:
-            self.cash += price
-            m.sell_orders += 1
-            self.shares -= 1
+            self._sell(1, price)
 
     def _trade_value(self, price: float) -> None:
         """价值投资：内在价值低估则买，高估则卖"""
@@ -1178,23 +1194,25 @@ class Trader(Agent):
         if price < self.intrinsic_value_estimate * 0.80 and self.cash >= price:
             self.cash -= price
             self.shares += 1
+            # 移动平均成本基准
+            total_cost = self.cost_basis * (self.shares - 1) + price
+            self.cost_basis = total_cost / self.shares
             m.buy_orders += 1
         elif price > self.intrinsic_value_estimate * 1.20 and self.shares > 0:
-            self.cash += price
-            m.sell_orders += 1
-            self.shares -= 1
+            self._sell(1, price)
 
     def _trade_noise(self, price: float) -> None:
         """噪声交易：随机买卖（模拟散户非理性行为）"""
         m = self.model
         if self.cash >= price and self.random.random() < 0.2:
-            self.cash -= price
+            cost = price
+            self.cash -= cost
+            total_cost = self.cost_basis * self.shares + cost
             self.shares += 1
+            self.cost_basis = total_cost / self.shares
             m.buy_orders += 1
         if self.shares > 0 and self.random.random() < 0.18:
-            self.cash += price
-            m.sell_orders += 1
-            self.shares -= 1
+            self._sell(1, price)
 
     def _trade_market_maker(self, price: float) -> None:
         """做市商：双向挂单，赚取买卖价差"""
@@ -1204,16 +1222,16 @@ class Trader(Agent):
         ask = price * (1 + spread)
 
         # 市价单：假设买卖均按当前价格成交
-        # 买入（当价格低于内在价值时）
+        # 买入
         if self.cash >= ask and self.random.random() < 0.4:
             self.cash -= ask
             self.shares += 1
+            total_cost = self.cost_basis * (self.shares - 1) + ask
+            self.cost_basis = total_cost / self.shares
             m.buy_orders += 1
         # 卖出
         if self.shares > 0 and self.random.random() < 0.4:
-            self.cash += bid
-            m.sell_orders += 1
-            self.shares -= 1
+            self._sell(1, bid)
 
     def trade(self) -> None:
         """根据策略类型执行交易"""
@@ -1226,6 +1244,22 @@ class Trader(Agent):
             self._trade_noise(price)
         elif self.strategy == TraderStrategy.MARKET_MAKER:
             self._trade_market_maker(price)
+
+    def _sell(self, n: int, price: float) -> None:
+        """卖出 n 股，含资本利得税，修复税收泄漏"""
+        if n <= 0 or self.shares < n:
+            return
+        proceeds = price * n
+        cost = self.cost_basis * n
+        gain = max(0.0, proceeds - cost)
+        tax = gain * self.model.capital_gains_tax
+        self.cash += proceeds - tax
+        self.model.govt_revenue += tax
+        self.model.capital_gains_tax_revenue += tax
+        # 已实现收益累计（不含税）
+        self.realized_gains += gain - tax
+        self.shares -= n
+        self.model.sell_orders += n
 
     def update_wealth(self) -> None:
         self.wealth = self.cash + self.shares * self.model.stock_price
@@ -1420,7 +1454,7 @@ class EconomyModel(Model):
         self.datacollector = DataCollector(
             model_reporters={
                 "stock_price":    "stock_price",
-                "avg_price":      lambda m: round(m.avg_price, 2),
+                "price_index":    lambda m: round(m.avg_price, 2),
                 "gdp":            "gdp",
                 "unemployment":   lambda m: round(m.unemployment * 100, 1),
                 "gini":           lambda m: round(m.gini, 4),
