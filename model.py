@@ -332,6 +332,86 @@ SHOCK_EFFECTS = {
 
 
 # ══════════════════════════════════════════════════════════════
+from dataclasses import dataclass
+
+
+@dataclass
+class BalanceSheet:
+    """通用资产负债表 — v4.0 资金守恒地基"""
+    cash: float = 0.0
+    deposits: float = 0.0
+    inventory: float = 0.0
+    loans_outstanding: float = 0.0
+    loan_principal: float = 0.0
+    shares_owned: int = 0
+    cost_basis: float = 0.0
+    capital_stock: float = 0.0
+    rnd_investment: float = 0.0
+
+    @property
+    def liquid_assets(self) -> float:
+        return self.cash + self.deposits
+
+    @property
+    def equity(self) -> float:
+        return self.liquid_assets - self.loan_principal
+
+
+def transfer(sender_bs, receiver_bs, amount, sender_bank=None,
+              receiver_bank=None, tax_rate=0.0, govt=None) -> float:
+    """统一资金转账 — 所有 Agent 间支付的唯一入口"""
+    if amount <= 0:
+        return 0.0
+    tax = 0.0
+    net = amount
+    if tax_rate > 0 and govt is not None:
+        tax = amount * tax_rate
+        net = amount - tax
+        govt.govt_revenue += tax
+    if sender_bank is not None and sender_bs.deposits >= net:
+        sender_bs.deposits -= net
+        sender_bank.deposits -= net
+    else:
+        from_dep = min(sender_bs.deposits, net) if sender_bank else 0.0
+        from_cash = net - from_dep
+        sender_bs.deposits -= from_dep
+        if sender_bank:
+            sender_bank.deposits -= from_dep
+        sender_bs.cash -= from_cash
+    if receiver_bank is not None:
+        receiver_bs.deposits += net
+        receiver_bank.deposits += net
+    else:
+        receiver_bs.cash += net
+    return net
+
+
+def bank_lend(bank, borrower_bs, amount) -> bool:
+    """贷款创造存款 — M1 扩张"""
+    if amount <= 0:
+        return False
+    bank.total_loans += amount
+    bank.deposits += amount
+    borrower_bs.deposits += amount
+    return True
+
+
+def bank_repay(bank, borrower_bs, principal, interest) -> float:
+    """还贷 — M1 收缩"""
+    total = principal + interest
+    if total <= 0 or borrower_bs.deposits <= 0:
+        return 0.0
+    if borrower_bs.deposits < total:
+        ratio = borrower_bs.deposits / total
+        principal *= ratio
+        interest *= ratio
+        total = principal + interest
+    borrower_bs.deposits -= total
+    bank.deposits -= total
+    bank.total_loans -= principal
+    bank.reserves += interest
+    return total
+
 # 代理人
 # ══════════════════════════════════════════════════════════════
 
