@@ -2342,6 +2342,177 @@ def compute_unemployment(model: EconomyModel) -> float:
 #  LAYER 3 — 宏观引擎层 (MACRO)
 #  EconomyModel 主循环 + 统计指标 + 外部冲击
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+class InterbankMarket:
+    """
+    同业拆借市场（Overnight Lending / Interbank Market）
+
+    机制：
+      - 每日结算前，准备金不足的银行（Lender）向富余的银行（Borrower）借款
+      - 利率由 "古典信贷配给" 决定：
+          · 资金充裕时 → 低利率（接近 0）
+          · 系统性紧张时 → 飙升（恐惧溢价）
+      - 贷款通过 Ledger.transfer()，M0 守恒
+
+    涌现效果：
+      - 雷曼式连锁违约：一家银行破产 → 同业贷款违约 → 信任危机
+      - SHIBOR/LIBOR 飙升作为系统性风险的前瞻指标
+      - 信用枯竭比破产本身更具破坏力
+    """
+
+    def __init__(self, model: "EconomyModel"):
+        self.model = model
+        # 隔夜拆借利率（年化，日利率 = rate / 365）
+        self.overnight_rate: float = 0.01
+        # 恐惧溢价：当有银行处于危机时，利率飙升
+        self.fear_premium: float = 0.0
+        # 同业贷款账本：(borrower_id, lender_id) -> principal
+        self.interbank_loans: dict = {}
+        # 历史利率序列（用于图表）
+        self.rate_history: list[float] = []
+        # 违约记录
+        self.defaults: list[dict] = []
+
+    def clear(self) -> None:
+        """每轮开始时清空上轮的同业贷款记录（新的一天 = 新结算）"""
+        self.interbank_loans.clear()
+        self.fear_premium = 0.0
+
+    def settle(self) -> None:
+        """
+        同业拆借结算（每轮 step 开始时调用，步骤 4a）
+
+        逻辑顺序：
+          1. 计算各银行准备金率 = reserves / total_loans
+          2. 过剩银行（准备金率 > 15%）作为 Lender
+          3. 不足银行（准备金率 < 5%）作为 Borrower
+          4. Borrower 向 Lender 按基准利率 + 恐惧溢价借款
+          5. 若某 Lender 因借款者违约损失准备金 → fear_premium ↑ → 利率螺旋
+        """
+        active = self.model._active_banks()
+        if len(active) < 2:
+            return
+
+        self.clear()
+
+        # ── 计算每家银行的准备金状况 ─────────────────────
+        banks_info = []
+        for b in active:
+            capital_ratio = b.capital / max(1.0, b.total_loans)
+            res_ratio = b.reserves / max(1.0, b.deposits)
+            banks_info.append({
+                "bank": b,
+                "capital_ratio": capital_ratio,
+                "res_ratio": res_ratio,
+            })
+
+        # ── Lender / Borrower 分类 ─────────────────────
+        lenders = [info for info in banks_info if info["res_ratio"] > 0.15]
+        borrowers = [info for info in banks_info if info["res_ratio"] < 0.05]
+
+        # 基准利率（银行平均贷款利率，年化）
+        base_rate = (sum(b.loan_rate for b in self.model.banks) /
+                     max(1, len(self.model.banks)))
+
+        if not borrowers:
+            # 系统资金充裕，同业利率降至基准
+            self.overnight_rate = base_rate * 0.5
+            self.rate_history.append(self.overnight_rate)
+            return
+
+        if not lenders:
+            # 无 Lender → 极度紧缩，利率飙升（雷曼时刻）
+            self.fear_premium = 0.15
+            self.overnight_rate = base_rate * 5 + self.fear_premium
+            self.rate_history.append(self.overnight_rate)
+            return
+
+        # ── 逐笔撮合（同业市场出清）─────────────────────
+        # 所有利率均为年化（与 SHIBOR 惯例一致）
+        annual_rate = base_rate + self.fear_premium
+
+        for binfo in borrowers:
+            borrower = binfo["bank"]
+            # 需求量 = 补足到 10% 准备金率所需的金额
+            target_res = borrower.deposits * 0.10
+            shortfall = max(0.0, target_res - borrower.reserves)
+
+            if shortfall <= 0:
+                continue
+
+            # 从富余银行中随机选一家 Lender
+            lender = self.model.random.choice(lenders)
+            lender_bank = lender["bank"]
+            excess = lender_bank.reserves - lender_bank.deposits * 0.10
+            if excess <= 0:
+                continue
+
+            # 借款金额
+            amount = min(shortfall, excess)
+
+            # ── SFC 记账：通过 Ledger 转移准备金 ────────
+            if self.model.ledger.transfer(lender_bank, borrower, amount):
+                key = (borrower.unique_id, lender_bank.unique_id)
+                self.interbank_loans[key] = self.interbank_loans.get(key, 0.0) + amount
+
+                # ── 违约风险传导 ─────────────────────────
+                # 若 Borrower 之后违约， Lender 损失准备金 → 恐惧溢价螺旋
+
+        # 更新同业利率（成交量加权，越多银行缺钱利率越高）
+        if self.interbank_loans:
+            n_borrowers = len(borrowers)
+            self.overnight_rate = annual_rate * (1 + n_borrowers * 0.05 + self.fear_premium)
+        else:
+            self.overnight_rate = annual_rate
+
+        self.rate_history.append(self.overnight_rate)
+
+    def resolve_defaults(self) -> None:
+        """
+        违约传导（步骤 4b，在银行 update_bad_debts 后调用）
+
+        若某银行破产（上轮触发 check_bankruptcy），其欠其他银行的同业贷款也违约。
+        这会在 Lender 资产负债表上留下坏账，触发恐惧溢价螺旋。
+        """
+        active = self.model._active_banks()
+        newly_failed = []
+
+        # 检查谁在这轮破产了
+        for b in active:
+            if getattr(b, "_flagged_bankrupt", False):
+                newly_failed.append(b)
+
+        for failed in newly_failed:
+            # 该银行作为 Borrower 的所有同业贷款违约
+            to_remove = []
+            for (b_id, l_id), amount in self.interbank_loans.items():
+                if b_id == failed.unique_id:
+                    # 找到 Lender，向其转回象征性 10% 清算款
+                    lender = next((bk for bk in active if bk.unique_id == l_id), None)
+                    if lender:
+                        recovery = amount * 0.10
+                        self.model.ledger.transfer(failed, lender, recovery)
+                    to_remove.append((b_id, l_id))
+                    self.defaults.append({
+                        "step": self.model.step_count,
+                        "borrower": b_id,
+                        "lender": l_id,
+                        "amount": amount,
+                    })
+                    # Lender 准备金损失 → 下一轮 fear_premium ↑
+                    self.fear_premium = min(0.20, self.fear_premium + 0.03)
+
+            for key in to_remove:
+                del self.interbank_loans[key]
+
+    @property
+    def shibor(self) -> float:
+        """当前隔夜拆借利率（年化，与 SHIBOR 惯例一致）"""
+        return self.overnight_rate
+
+
+
 class EconomyModel(Model):
     """
     主模型 v3.0
@@ -2398,6 +2569,8 @@ class EconomyModel(Model):
         # ── Layer 0: SFC 物理法则 ──────────────────────
         self.government = Government()
         self.ledger = Ledger(self)
+        # ── 同业拆借市场 ────────────────────────────────
+        self.interbank_market = InterbankMarket(self)
 
         # ── 股市流动性池（买方出资、卖方收款，M0 守恒） ───
         self._market_pool = _MarketPool()
@@ -2605,6 +2778,10 @@ class EconomyModel(Model):
             "m0_drift": round(self._calc_m0() - self._initial_m0, 6),
             "bankrupt_count": self.bankrupt_count,
             "current_shock": self.current_shock,
+            "shibor": round(self.interbank_market.shibor, 4),
+            "interbank_volume": round(sum(self.interbank_market.interbank_loans.values()), 2),
+            "interbank_defaults": len(self.interbank_market.defaults),
+            "fear_premium": round(self.interbank_market.fear_premium, 4),
         }
 
     def _checkpoint(self) -> None:
@@ -2643,6 +2820,9 @@ class EconomyModel(Model):
             bank.pay_deposit_interest()
             bank.pay_bond_coupon()   # 支付国债利息（先于债券投资）
 
+        # 1a. 同业拆借市场：银行间准备金余缺调剂 → 形成 SHIBOR 利率
+        self.interbank_market.settle()
+
         # 2. 政府：计算赤字 → 发布国债 → 让银行决定是否购债
         self._gov_issue_bonds()     # 发布债券（产生待购队列）
         for bank in self.banks:
@@ -2672,6 +2852,9 @@ class EconomyModel(Model):
         for bank in self.banks:
             bank.lend()
             bank.update_bad_debts()
+
+        # 5a. 同业违约传导：一家银行破产 → 同业贷款违约 → 恐惧溢价螺旋
+        self.interbank_market.resolve_defaults()
 
         # 6. 居民：领工资 → 缴税 → 还贷 → 存款 → 消费（可能产生消费贷申请）
         #    注意：PlayerHousehold 重写 step() 不执行 AI 逻辑，

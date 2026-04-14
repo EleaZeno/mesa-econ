@@ -110,6 +110,15 @@ def _rec():
                 "cb_gdp": round(getattr(m, "city_b_gdp", 0)),
                 "ca_unemp": round(getattr(m, "city_a_unemp", 0) * 100, 1),
                 "cb_unemp": round(getattr(m, "city_b_unemp", 0) * 100, 1),
+                # ── 同业拆借市场 ────────────────────────────────
+                "shibor": round(
+                    getattr(m, "interbank_market", None) and m.interbank_market.shibor * 100 or 0, 2),
+                "interbank_vol": round(
+                    sum(getattr(m, "interbank_market", None) and
+                        m.interbank_market.interbank_loans.values() or [0]), 1),
+                "fear_premium": round(
+                    getattr(m, "interbank_market", None) and
+                    m.interbank_market.fear_premium * 100 or 0, 2),
             }
         except Exception:
             ent = {"cycle": getattr(_md, "cycle", 0)}
@@ -137,8 +146,8 @@ def _make_fig(hist_data: list) -> plt.Figure:
         ("GDP", "gdp", "#3b82f6"),
         ("失业率 (%)", "unemp", "#f59e0b"),
         ("Gini 系数", "gini", "#8b5cf6"),
+        ("SHIBOR利率 (%)", "shibor", "#f97316"),
         ("企业数量", "nfirms", "#10b981"),
-        ("市场利率 (%)", "mkt_rate", "#f97316"),
         ("银行坏账率 (%)", "bdr", "#ef4444"),
     ]
 
@@ -213,7 +222,8 @@ def _snapshot():
             f"基尼 = **{last['gini']:.3f}** &nbsp;|&nbsp; "
             f"企业 = **{last['nfirms']}** &nbsp;|&nbsp; "
             f"失业率 = **{last['unemp']:.1f}%** &nbsp;|&nbsp; "
-            f"市场利率 ≈ **{last['mkt_rate']:.1f}%** *(涌现)*\n\n"
+            f"市场利率 ≈ **{last['mkt_rate']:.1f}%** *(涌现)* &nbsp;|&nbsp; "
+            f"SHIBOR ≈ **{last.get('shibor', 0):.2f}%**\n\n"
             f"🏙️ A城 {last['ca_pop']}人 GDP={last['ca_gdp']:,} 失业{last['ca_unemp']:.1f}% &nbsp;&nbsp;"
             f"🌆 B城 {last['cb_pop']}人 GDP={last['cb_gdp']:,} 失业{last['cb_unemp']:.1f}%"
         )
@@ -572,7 +582,7 @@ def build_ui() -> gr.Blocks:
 
                 # 消费
                 with gr.Row():
-                    sl_qty = gr.Number(value=1, min=1, max=10, step=1, label="购买数量", scale=1)
+                    sl_qty = gr.Number(value=1, minimum=1, maximum=10, step=1, label="购买数量", scale=1)
                     sel_goods = gr.Dropdown(label="选择商品", choices=[], scale=2, interactive=True)
                 with gr.Row():
                     btn_consume = gr.Button("🛒 消费", variant="secondary", scale=1)
@@ -580,7 +590,7 @@ def build_ui() -> gr.Blocks:
 
                 # 股票
                 with gr.Row():
-                    sl_shares = gr.Number(value=1, min=1, max=100, step=1, label="股数", scale=1)
+                    sl_shares = gr.Number(value=1, minimum=1, maximum=100, step=1, label="股数", scale=1)
                 with gr.Row():
                     btn_buy_stock = gr.Button("📈 买入股票", scale=1)
                     btn_sell_stock = gr.Button("📉 卖出股票", scale=1)
@@ -596,22 +606,22 @@ def build_ui() -> gr.Blocks:
                 firm_status_md = gr.Markdown("*启动后显示企业状态*")
 
                 with gr.Row():
-                    sl_price = gr.Number(value=10, min=1, max=100, step=1, label="商品定价", scale=1)
-                    sl_wage = gr.Number(value=8, min=1, max=50, step=0.5, label="工资标准", scale=1)
+                    sl_price = gr.Number(value=10, minimum=1, maximum=100, step=1, label="商品定价", scale=1)
+                    sl_wage = gr.Number(value=8, minimum=1, maximum=50, step=0.5, label="工资标准", scale=1)
                 with gr.Row():
                     btn_set_price = gr.Button("💰 调价", scale=1)
                     btn_set_wage = gr.Button("💵 调薪", scale=1)
 
                 with gr.Row():
-                    sl_positions = gr.Number(value=2, min=0, max=20, step=1, label="招聘名额", scale=1)
-                    sl_fire = gr.Number(value=0, min=0, max=10, step=1, label="裁员人数", scale=1)
+                    sl_positions = gr.Number(value=2, minimum=0, maximum=20, step=1, label="招聘名额", scale=1)
+                    sl_fire = gr.Number(value=0, minimum=0, maximum=10, step=1, label="裁员人数", scale=1)
                 with gr.Row():
                     btn_hire = gr.Button("➕ 招人", scale=1)
                     btn_fire = gr.Button("➖ 裁员", scale=1)
                     btn_open_pos = gr.Button("📋 开职位", scale=1)
 
                 with gr.Row():
-                    sl_dividend = gr.Number(value=0, min=0, max=5, step=0.1, label="每股分红", scale=1)
+                    sl_dividend = gr.Number(value=0, minimum=0, maximum=5, step=0.1, label="每股分红", scale=1)
                 btn_dividend = gr.Button("📊 设分红", scale=1)
 
                 firm_feedback = gr.Textbox(label="企业反馈", interactive=False, lines=2)
@@ -621,11 +631,11 @@ def build_ui() -> gr.Blocks:
                 mayor_status_md = gr.Markdown("*财富≥1000 & 员工≥5 解锁*")
 
                 with gr.Row():
-                    sl_city_tax_a = gr.Number(value=12, min=5, max=40, step=1, label="A城税率%", scale=1)
-                    sl_city_tax_b = gr.Number(value=18, min=5, max=40, step=1, label="B城税率%", scale=1)
+                    sl_city_tax_a = gr.Number(value=12, minimum=5, maximum=40, step=1, label="A城税率%", scale=1)
+                    sl_city_tax_b = gr.Number(value=18, minimum=5, maximum=40, step=1, label="B城税率%", scale=1)
                 with gr.Row():
-                    sl_city_sub_a = gr.Number(value=10, min=0, max=100, step=5, label="A城补贴", scale=1)
-                    sl_city_sub_b = gr.Number(value=5, min=0, max=100, step=5, label="B城补贴", scale=1)
+                    sl_city_sub_a = gr.Number(value=10, minimum=0, maximum=100, step=5, label="A城补贴", scale=1)
+                    sl_city_sub_b = gr.Number(value=5, minimum=0, maximum=100, step=5, label="B城补贴", scale=1)
                 with gr.Row():
                     btn_city_tax = gr.Button("🏛️ 设税率", scale=1)
                     btn_city_sub = gr.Button("🏛️ 设补贴", scale=1)
@@ -635,8 +645,8 @@ def build_ui() -> gr.Blocks:
                 fed_status_md = gr.Markdown("*财富≥5000 & 员工≥10 解锁*")
 
                 with gr.Row():
-                    sl_rate_delta = gr.Number(value=0.01, min=-0.05, max=0.05, step=0.005, label="利率调整", scale=1)
-                    sl_qe = gr.Number(value=100, min=0, max=1000, step=50, label="QE金额", scale=1)
+                    sl_rate_delta = gr.Number(value=0.01, minimum=-0.05, maximum=0.05, step=0.005, label="利率调整", scale=1)
+                    sl_qe = gr.Number(value=100, minimum=0, maximum=1000, step=50, label="QE金额", scale=1)
                 with gr.Row():
                     btn_rate = gr.Button("🏦 调利率", scale=1)
                     btn_qe = gr.Button("🏦 量化宽松", scale=1)
