@@ -510,10 +510,11 @@ class Ledger:
         return True
 
     def print_money(self, amount: float) -> None:
-        """央行合法印钞：增加政府现金并记录"""
+        """QE：央行从市场池(MarketPool)抽流动性注入政府金库"""
         if amount <= 0:
             return
-        self.model.government.cash += amount
+        # 从市场池抽走（象征流动性减少），政府注入资金
+        self.transfer(self.model._market_pool, self.model.government, amount)
         self.model.government.total_printed_money += amount
 
 
@@ -619,7 +620,7 @@ class Household(Agent):
         if self.cash >= repayment:
             # 资金闭环：还款进入银行准备金
             if self.model.banks:
-                bank = self.random.choice(self.model.banks)
+                bank = self.random.choice(self.model._active_banks())
                 if self.model.ledger.transfer(self, bank, repayment):
                     self.loan_principal = max(0.0, self.loan_principal - max(0.0, repayment - interest))
 
@@ -631,7 +632,7 @@ class Household(Agent):
         deposit_rate = (1 - self.mpc) * 0.3
         deposit = self.cash * deposit_rate
         if deposit > 1 and self.model.banks:
-            bank = self.random.choice(self.model.banks)
+            bank = self.random.choice(self.model._active_banks())
             if self.model.ledger.transfer(self, bank, deposit):
                 bank.deposits += deposit
 
@@ -1320,7 +1321,7 @@ class Firm(Agent):
             return
 
         if self.model.banks:
-            bank = self.random.choice(self.model.banks)
+            bank = self.random.choice(self.model._active_banks())
             if self.model.ledger.transfer(self, bank, repayment):
                 self.loan_principal -= max(0.0, repayment - interest)
                 self._bs.cash = self.cash
@@ -1344,7 +1345,7 @@ class Firm(Agent):
             self.cash, self.loan_principal,
         )
         if self.model.banks:
-            bank = self.random.choice(self.model.banks)
+            bank = self.random.choice(self.model._active_banks())
             # 违约损失率（银行实际承受）
             actual_loss = self.loan_principal * DEFAULTS["default_loss_rate"]
             bank.total_loans -= self.loan_principal
@@ -1373,7 +1374,7 @@ class Firm(Agent):
             if self.loan_principal > 0:
                 self.model.total_loans_outstanding -= self.loan_principal
                 if self.model.banks:
-                    bank = self.random.choice(self.model.banks)
+                    bank = self.random.choice(self.model._active_banks())
                     loss = self.loan_principal * 0.8  # 破产损失率80%
                     bank.total_loans -= self.loan_principal
                     bank.bad_debts += loss
@@ -2281,9 +2282,13 @@ class EconomyModel(Model):
         cp_dir = os.path.join(os.path.dirname(__file__), "checkpoints")
         os.makedirs(cp_dir, exist_ok=True)
         if self.cycle % 500 == 0:
-            path = os.path.join(cp_dir, f"model_step_{self.cycle}.pkl")
-            with open(path, "wb") as f:
-                pickle.dump(self, f)
+            try:
+                path = os.path.join(cp_dir, f"model_step_{self.cycle}.pkl")
+                with open(path, "wb") as f:
+                    pickle.dump(self, f)
+            except (TypeError, AttributeError):
+                # Mesa DataCollector 含 lambda 函数无法 pickle，静默跳过
+                pass
 
     # ── 属性代理 ───────────────────────────────────────────
 
@@ -2734,7 +2739,13 @@ class EconomyModel(Model):
     def adjust_interest_rate(self, delta: float) -> None:
         """Policy transmission: adjust all banks' loan rates"""
         for b in self.banks:
+            if b is None:
+                continue
             b.loan_rate = _clamp(b.loan_rate + delta, 0.01, 0.25)
+
+    def _active_banks(self) -> list:
+        """过滤已移除的 None Bank"""
+        return [b for b in self.banks if b is not None]
 
 
     def adjust_tax_rate(self, delta: float) -> None:
