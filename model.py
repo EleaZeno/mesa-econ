@@ -783,6 +783,134 @@ class Household(Agent):
         # 求职成功率：35%（有岗位就能找到）
         # 实际招聘（修改 employees/open_positions）由 Firm.hire() 统一处理
 
+    # ── 玩家代理：等待外部决策 ─────────────────────────────────
+    # step() 由 PlayerHousehold 类重写（见下方）
+    def get_player_options(self) -> dict:
+        """打包玩家当前可选操作，供 UI 读取。"""
+        # 就业选项
+        firms_with_jobs = [f for f in self.model.firms if f.open_positions > 0]
+        job_options = []
+        for f in firms_with_jobs[:8]:  # 最多展示8个
+            job_options.append({
+                "firm_id": f.unique_id,
+                "industry": f.industry.value,
+                "wage_offer": round(f.wage_offer, 1),
+                "city": f.city.value if hasattr(f.city, 'value') else str(f.city),
+            })
+
+        # 商品选项
+        firms_with_stock = self.model._cache.get('firms_with_stock', [])
+        goods_options = []
+        for f in sorted(firms_with_stock, key=lambda x: x.price)[:8]:
+            goods_options.append({
+                "firm_id": f.unique_id,
+                "price": round(f.price, 1),
+                "city": f.city.value if hasattr(f.city, 'value') else str(f.city),
+            })
+
+        # 存款选项（当前银行利率）
+        bank_options = []
+        for b in self.model._active_banks()[:4]:
+            bank_options.append({
+                "bank_id": b.unique_id,
+                "deposit_rate": round(b.deposit_rate * 100, 2),
+                "loan_rate": round(b.loan_rate * 100, 2),
+            })
+
+        return {
+            "hh_id": self.unique_id,
+            "cash": round(self.cash, 2),
+            "salary": round(self.salary, 2),
+            "employed": self.employed,
+            "employer_id": self.employer.unique_id if self.employer else None,
+            "loan_principal": round(self.loan_principal, 2),
+            "credit_score": round(self.credit_score, 0),
+            "shares_owned": self.shares_owned,
+            "stock_price": round(self.model.stock_price, 2),
+            "city": self.city.value if hasattr(self.city, 'value') else str(self.city),
+            "job_options": job_options,
+            "goods_options": goods_options,
+            "bank_options": bank_options,
+        }
+
+    def apply_player_decision(self, decision: dict) -> None:
+        """执行玩家决策（由 model.step() 在 AI HH 之后调用）"""
+        d = decision
+        if not d:
+            return
+
+        # ── 接受工作 ─────────────────────────────────────────
+        if d.get("action") == "accept_job" and not self.employed:
+            firm_id = d.get("firm_id")
+            firm = next((f for f in self.model.firms if f.unique_id == firm_id), None)
+            if firm and firm.open_positions > 0:
+                firm.employees += 1
+                firm.open_positions -= 1
+                self.employed = True
+                self.employer = firm
+                self.salary = firm.wage_offer
+                firm._employees.append(self)
+
+        # ── 消费商品 ──────────────────────────────────────────
+        elif d.get("action") == "consume":
+            firm_id = d.get("firm_id")
+            qty = int(d.get("qty", 1))
+            firm = next((f for f in self.model.firms if f.unique_id == firm_id), None)
+            if firm and firm.inventory >= qty and qty > 0:
+                price = firm.price * qty
+                if self.cash >= price:
+                    if self.model.ledger.transfer(self, firm, price):
+                        firm.inventory -= qty
+                        self.goods += qty
+                        tax = price * self.model.tax_rate
+                        if tax > 0:
+                            self.model.ledger.transfer(firm, self.model.government, tax)
+                            self.model._collect_tax(tax)
+
+        # ── 银行存款 ──────────────────────────────────────────
+        elif d.get("action") == "deposit":
+            bank_id = d.get("bank_id")
+            amount = float(d.get("amount", 0))
+            bank = next((b for b in self.model.banks if b.unique_id == bank_id), None)
+            if bank and amount > 0 and self.cash >= amount:
+                if self.model.ledger.transfer(self, bank, amount):
+                    bank.deposits += amount
+
+        # ── 申请贷款 ─────────────────────────────────────────
+        elif d.get("action") == "apply_loan":
+            bank_id = d.get("bank_id")
+            amount = float(d.get("amount", 0))
+            if amount > 0:
+                self.model._pending_loan_requests.append(
+                    (self, amount, "consumption")
+                )
+
+        # ── 买入股票 ──────────────────────────────────────────
+        elif d.get("action") == "buy_stock":
+            shares = int(d.get("shares", 0))
+            price = self.model.stock_price * shares
+            if shares > 0 and self.cash >= price:
+                if self.model.ledger.transfer(self, self.model._market_pool, price):
+                    total_cost = self.cost_basis * self.shares_owned + price
+                    self.shares_owned += shares
+                    self.cost_basis = total_cost / self.shares_owned if self.shares_owned > 0 else 0.0
+                    self.model.buy_orders += shares
+
+        # ── 卖出股票 ─────────────────────────────────────────
+        elif d.get("action") == "sell_stock":
+            shares = int(d.get("shares", 0))
+            if shares > 0 and self.shares_owned >= shares:
+                proceeds = self.model.stock_price * shares
+                cost = self.cost_basis * shares
+                gain = max(0.0, proceeds - cost)
+                tax = gain * self.model.capital_gains_tax
+                self.model.ledger.transfer(self.model._market_pool, self, proceeds - tax)
+                if tax > 0:
+                    self.model.ledger.transfer(self, self.model.government, tax)
+                    self.model._collect_tax(tax)
+                self.model.sell_orders += shares
+                self.shares_owned -= shares
+
     def update_wealth(self) -> None:
         """财富 = 现金 - 负债 + 股票市值"""
         stock_value = self.shares_owned * self.model.stock_price
@@ -902,6 +1030,32 @@ class Household(Agent):
         self._consider_migration()
         self.consider_entrepreneurship()
 
+
+class PlayerHousehold(Household):
+    """
+    玩家化身（v1.0）
+    
+    重写 step()：跳过所有 AI 逻辑，只把自己打包进 pending 队列，
+    等待外部 UI 传来决策后由 model.step() 末尾执行。
+    
+    注意：工资/纳税/存款/贷款由 Firm.pay_wages() / Bank.lend() 
+    自动处理，玩家只需控制：
+      - 消费：买哪家，买多少
+      - 股票：买多少，卖多少
+      - 跳槽：接受哪家 offer
+    """
+
+    def step(self) -> None:
+        """暂停 AI，把自己打包进 pending 队列"""
+        # 写入可选操作 + 等待标志（UI 轮询读取）
+        self.model._pending_player = {
+            "_waiting": True,
+            **self.get_player_options(),
+        }
+        # AI 逻辑全部跳过——等玩家决策
+
+
+# ── EconomyModel：玩家决策入口 ──────────────────────────────────
 
 class Firm(Agent):
     """
@@ -2106,6 +2260,8 @@ class EconomyModel(Model):
         # 每个请求：(requester, amount, loan_type)
         # loan_type: "consumption" | "operational"
         self._pending_loan_requests: list = []
+        # ── 玩家代理决策缓存 ────────────────────────────────
+        self._pending_player: dict = {}     # PlayerHousehold 当前可选操作 + 等待决策
         # ── 国债发行待购队列 ───────────────────────────────
         self._bond_buyers_pending: float = 0.0   # 本轮待发行的国债面值
 
@@ -2159,7 +2315,12 @@ class EconomyModel(Model):
         n_bank = max(1, int(kwargs.get("n_banks", DEFAULTS["n_banks"])))
         n_trader = max(1, int(kwargs.get("n_traders", DEFAULTS["n_traders"])))
 
-        for _ in range(n_hh):
+        # 第 0 号是玩家化身，其余是 AI 居民
+        p = PlayerHousehold(self)
+        self.agents.add(p)
+        self.households.append(p)
+
+        for _ in range(n_hh - 1):
             h = Household(self)
             self.agents.add(h)
             self.households.append(h)
@@ -2331,6 +2492,9 @@ class EconomyModel(Model):
             bank.update_bad_debts()
 
         # 6. 居民：领工资 → 缴税 → 还贷 → 存款 → 消费（可能产生消费贷申请）
+        #    注意：PlayerHousehold 重写 step() 不执行 AI 逻辑，
+        #    只把自己的可选操作写入 _pending_player，等 UI 传来 decision 后
+        #    在步骤 12 执行玩家决策（同帧生效，和 AI HH 同时结算）
         for hh in self.households:
             hh.step()
 
@@ -2353,7 +2517,20 @@ class EconomyModel(Model):
 
         # 11. 刷新运行时缓存
         self._refresh_cache()
-        self._checkpoint()  # Plan 2: 每 500 轮断点序列化
+        self._checkpoint()
+
+        # 12. 执行玩家决策（同帧结算：和 AI HH 同时，不额外占用帧）
+        #    PlayerHousehold.step() 已写入 _pending_player
+        #    收到 {"decision": {...}} → 执行并清空
+        #    未收到 → _pending_player 保持原样，UI 下次轮询仍能看到
+        pending = self._pending_player
+        if pending.get("decision"):
+            player = next(
+                (hh for hh in self.households if isinstance(hh, PlayerHousehold)), None
+            )
+            if player:
+                player.apply_player_decision(pending["decision"])
+            self._pending_player = {}  # 清空，下轮 PlayerHousehold 会重新写入 options
 
     # ── 国债发行 + 购买（方向二核心）──────────────────────────
 

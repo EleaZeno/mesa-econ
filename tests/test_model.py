@@ -205,5 +205,40 @@ class TestMoneyConservation:
             f"银行总准备金严重透支: {total_reserves:.2f}"
 
 
+class TestUltimateStress:
+    def test_10000_steps_doomsday_scenario(self):
+        """末日防线测试：万轮推演、极端冲击下不崩溃且SFC绝对守恒"""
+        from model import EconomyModel
+        import time
+
+        m = EconomyModel(seed=42)  # 锁定随机数保证可复现
+        start_time = time.time()
+
+        for i in range(1, 10001):
+            # 1. 执行推演与 SFC 审计
+            m.step()
+
+            # 2. 注入极端宏观冲击（考验系统的弹性与资金闭环）
+            if i % 500 == 0:
+                m.adjust_interest_rate(0.05)   # 暴力加息
+                m.adjust_tax_rate(0.1)         # 突然加税
+            if i % 730 == 0:
+                m.trigger_shock("BANKING_PANIC")  # 银行挤兑
+                m.qe_amount = 50.0                # 央行疯狂印钞救市
+            if i % 1000 == 0:
+                m.trigger_shock("TECH_BREAKTHROUGH")  # 技术大爆炸
+
+            # 3. 运行时的活体检测（防止僵尸化）
+            if i % 100 == 0:
+                # 断言必须有企业和人口存活
+                assert len(m.households) > 0, f"第 {i} 轮人类灭绝"
+                # 断言价格不会变成负数或无穷大
+                assert 0 < m.avg_price < float('inf'), f"第 {i} 轮物价崩溃: {m.avg_price}"
+
+        elapsed = time.time() - start_time
+        print(f"\n10000轮末日测试通过！耗时: {elapsed:.2f}秒")
+        assert m.cycle == 10000
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

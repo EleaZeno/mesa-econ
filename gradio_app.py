@@ -26,7 +26,20 @@ plt.rcParams["axes.unicode_minus"] = False
 
 import gradio as gr
 
-from model import EconomyModel
+from model import EconomyModel, PlayerHousehold
+
+# ── 全局仿真状态 ─────────────────────────────────────────────────
+_lock = threading.RLock()  # RLock: 可重入，防止 _rec/_snapshot 在 _lock 内递归死锁
+_md: Optional[EconomyModel] = None
+_hist: list = []
+_hl = threading.Lock()
+_run = False
+_stop = threading.Event()
+_thr: Optional[threading.Thread] = None
+
+# ── 玩家决策缓存（跨 API 传递）─────────────────────────────────
+_player_options_cache: dict = {}  # 供 /api/player_options 读取
+_player_decision_ready: dict = {}  # 供 model.step() 末尾读取
 
 # ── 全局仿真状态 ─────────────────────────────────────────────────
 _lock = threading.RLock()  # RLock: 可重入，防止 _rec/_snapshot 在 _lock 内递归死锁
@@ -227,6 +240,88 @@ def cb_step():
         raise
 
 
+# ── 玩家化身回调 ─────────────────────────────────────────────────
+def cb_player_status():
+    """返回玩家 HH 的实时状态面板"""
+    with _lock:
+        if _md is None:
+            return "**玩家状态：** 仿真未启动"
+        ph = next(
+            (h for h in _md.households if isinstance(h, PlayerHousehold)), None
+        )
+        if ph is None:
+            return "**玩家状态：** 未找到玩家化身"
+        pending = getattr(_md, "_pending_player", {})
+        waiting = "🟡 **等待决策**" if pending.get("_waiting") else "🟢 AI 自主"
+        return (
+            f"**玩家 HH #{ph.unique_id}**  {waiting}\n\n"
+            f"💰 现金：**{ph.cash:.1f}** &nbsp;|&nbsp; "
+            f"工资：**{ph.salary:.1f}**/轮 &nbsp;|&nbsp; "
+            f"商品：**{ph.goods}**\n\n"
+            f"📊 财富：**{ph.wealth:.1f}** &nbsp;|&nbsp; "
+            f"贷款：**{ph.loan_principal:.1f}** &nbsp;|&nbsp; "
+            f"信用分：**{ph.credit_score:.0f}**\n\n"
+            f"📈 持股：**{ph.shares_owned}** 股 × {_md.stock_price:.1f} = "
+            f"**{ph.shares_owned * _md.stock_price:.1f}** &nbsp;|&nbsp; "
+            f"🏙️ 城市：**{ph.city.value if hasattr(ph.city, 'value') else ph.city}**\n\n"
+            f"当前轮次：**{_md.cycle}** &nbsp;|&nbsp; "
+            f"健康分：**{_md.health_score:.0f}**"
+        )
+
+
+def cb_player_options():
+    """返回商品选项列表（供下拉框用）"""
+    with _lock:
+        if _md is None:
+            return [], []
+        pending = getattr(_md, "_pending_player", {})
+        if not pending:
+            return [], []
+        goods = pending.get("goods_options", [])
+        firms = pending.get("job_options", [])
+        # label = "企业N [城市] ¥价格"
+        goods_choices = [
+            f"企业{f['firm_id']} [{f['city']}] ¥{f['price']:.0f}"
+            for f in goods
+        ] if goods else ["-- 暂无商品 --"]
+        job_choices = [
+            f"企业{f['firm_id']} [{f['industry']}] 工资¥{f['wage_offer']:.0f}"
+            for f in firms
+        ] if firms else ["-- 暂无职位 --"]
+        return goods_choices, job_choices
+
+
+def cb_submit_decision(action_type: str, firm_idx: int, qty: int,
+                        shares: int, firm_job_idx: int):
+    """玩家提交决策 → 写入 model._pending_player['decision']"""
+    with _lock:
+        if _md is None:
+            return "❌ 模型未启动"
+        pending = getattr(_md, "_pending_player", {})
+        if not pending.get("_waiting"):
+            return "❌ 当前帧无需玩家决策"
+        decision = {"action": action_type}
+        if action_type == "consume" and firm_idx >= 0:
+            goods = pending.get("goods_options", [])
+            if firm_idx < len(goods):
+                decision["firm_id"] = goods[firm_idx]["firm_id"]
+                decision["qty"] = max(1, qty)
+        elif action_type == "buy_stock" and shares > 0:
+            decision["shares"] = shares
+        elif action_type == "sell_stock" and shares > 0:
+            decision["shares"] = shares
+        elif action_type == "accept_job" and firm_job_idx >= 0:
+            jobs = pending.get("job_options", [])
+            if firm_job_idx < len(jobs):
+                decision["firm_id"] = jobs[firm_job_idx]["firm_id"]
+        # 写入模型
+        _md._pending_player["decision"] = decision
+        return f"✅ 决策已提交 [{action_type}]，将在下一帧结算"
+
+
+
+
+
 def cb_toggle():
     global _run, _thr, _stop
     _run = not _run
@@ -283,11 +378,11 @@ def cb_poll():
 
 # ── Gradio Blocks UI ─────────────────────────────────────────────
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="经济沙盘 v4.0") as demo:
+    with gr.Blocks(title="经济沙盘 v5.2 — 玩家模式") as demo:
 
         # ── 顶部状态栏 ──────────────────────────────────────────
         stats_md = gr.Markdown(
-            "## 经济沙盘 v4.0\n\n*初始化中...*",
+            "## 经济沙盘 v5.2\n\n*初始化中...*",
             elem_classes=["stat-header"],
         )
 
@@ -329,6 +424,31 @@ def build_ui() -> gr.Blocks:
                     btn_bank = gr.Button("🏦 银行恐慌", size="sm")
                     btn_recovery = gr.Button("🌱 经济复苏", size="sm")
 
+                # ── 玩家化身面板 ────────────────────────────────────
+                gr.Markdown("### 👤 玩家化身")
+                player_status_md = gr.Markdown("*启动后显示玩家状态*")
+
+                # 消费
+                with gr.Row():
+                    sl_qty = gr.Number(value=1, min=1, max=10, step=1, label="购买数量", scale=1)
+                    sel_goods = gr.Dropdown(label="选择商品", choices=[], scale=2, interactive=True)
+                with gr.Row():
+                    btn_consume = gr.Button("🛒 消费", variant="secondary", scale=1)
+                    btn_skip = gr.Button("⏭ 跳过本轮", scale=1)
+
+                # 股票
+                with gr.Row():
+                    sl_shares = gr.Number(value=1, min=1, max=100, step=1, label="股数", scale=1)
+                with gr.Row():
+                    btn_buy_stock = gr.Button("📈 买入股票", scale=1)
+                    btn_sell_stock = gr.Button("📉 卖出股票", scale=1)
+
+                # 跳槽
+                sel_job = gr.Dropdown(label="接受工作 offer", choices=[], interactive=True)
+                btn_accept_job = gr.Button("💼 跳槽", variant="primary", scale=1)
+
+                player_feedback = gr.Textbox(label="操作反馈", interactive=False, lines=2)
+
             # ── 右侧：图表面板 ──────────────────────────────────
             with gr.Column(scale=3):
                 gr.Markdown("### 宏观经济指标")
@@ -343,8 +463,55 @@ def build_ui() -> gr.Blocks:
         # ── 事件绑定 ─────────────────────────────────────────────
         outputs = [stats_md, macro_plot, city_plot]
 
-        # 定时轮询
+        # 定时轮询（更新状态 + 选项）
         timer.tick(fn=cb_poll, outputs=outputs)
+        # 玩家面板轮询（定时刷新状态和选项）
+        timer.tick(fn=cb_player_status, outputs=[player_status_md])
+        timer.tick(fn=cb_player_options, outputs=[sel_goods, sel_job])
+
+        # 控制按钮
+        btn_step.click(fn=cb_step, outputs=outputs)
+        btn_toggle.click(fn=cb_toggle, outputs=[btn_toggle] + outputs)
+        btn_reset.click(fn=cb_reset, outputs=[btn_toggle] + outputs)
+        btn_apply.click(fn=cb_apply, inputs=all_sliders, outputs=outputs)
+
+        # 玩家操作
+        btn_consume.click(
+            fn=lambda idx, qty, **kw: cb_submit_decision("consume", int(idx or 0), int(qty or 1), 0, 0),
+            inputs=[sel_goods, sl_qty],
+            outputs=[player_feedback],
+        )
+        btn_skip.click(
+            fn=lambda **kw: cb_submit_decision("skip", -1, 1, 0, 0),
+            inputs=[],
+            outputs=[player_feedback],
+        )
+        btn_buy_stock.click(
+            fn=lambda s, **kw: cb_submit_decision("buy_stock", -1, 1, int(s or 1), 0),
+            inputs=[sl_shares],
+            outputs=[player_feedback],
+        )
+        btn_sell_stock.click(
+            fn=lambda s, **kw: cb_submit_decision("sell_stock", -1, 1, int(s or 1), 0),
+            inputs=[sl_shares],
+            outputs=[player_feedback],
+        )
+        btn_accept_job.click(
+            fn=lambda idx, **kw: cb_submit_decision("accept_job", -1, 1, 0, int(idx or 0)),
+            inputs=[sel_job],
+            outputs=[player_feedback],
+        )
+
+        # 冲击按钮
+        for btn, shock in [
+            (btn_oil, "oil_crisis"),
+            (btn_tech, "tech_breakthrough"),
+            (btn_demand, "demand_slowdown"),
+            (btn_trade, "trade_war"),
+            (btn_bank, "banking_panic"),
+            (btn_recovery, "recovery"),
+        ]:
+            btn.click(fn=lambda s=shock: cb_shock(s), outputs=outputs)
 
         # 控制按钮
         btn_step.click(fn=cb_step, outputs=outputs)
