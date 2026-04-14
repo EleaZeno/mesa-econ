@@ -414,293 +414,57 @@ def bank_repay(bank, borrower_bs, principal, interest) -> float:
     bank.reserves += interest
     return total
 
-# 代理人
-# ══════════════════════════════════════════════════════════════
-
-class City(Enum):
-    """城市标签（双城竞争）"""
-    CITY_A = "city_a"   # 城市 A（工业导向）
-    CITY_B = "city_b"   # 城市 B（科技导向）
-
-
-# ── 城市级参数（Phase 3：差异化政策）────────────────────────────
-CITY_PARAMS = {
-    City.CITY_A: {
-        "corporate_tax_rate": 0.12,    # 企业税率（低税吸引企业）
-        "wage_floor": 7.5,               # 最低工资
-        "subsidy_rate": 0.10,          # 补贴率
-        "infrastructure": 0.8,         # 基建水平（影响生产效率）
-    },
-    City.CITY_B: {
-        "corporate_tax_rate": 0.18,    # 企业税率（高税高福利）
-        "wage_floor": 6.8,               # 最低工资（劳动力便宜）
-        "subsidy_rate": 0.05,          # 补贴率
-        "infrastructure": 1.0,         # 基建水平（科技发达）
-    },
-}
-
-
-class Industry(Enum):
-    """企业所属行业"""
-    MANUFACTURING = "manufacturing"   # 制造业：资本密集，边际成本高
-    SERVICE = "service"               # 服务业：轻资产，人力密集
-    TECH = "tech"                    # 科技：研发投入大，生产率波动高
-
-
-class FirmLifecycle(Enum):
-    """企业生命周期阶段"""
-    STARTUP = "startup"      # 初创：高风险，负现金流，强融资需求
-    GROWTH = "growth"       # 成长期：盈利扩张，高招聘需求
-    MATURE = "mature"       # 成熟期：稳定分红，低风险
-    DECLINE = "decline"     # 衰退：产能过剩，裁员/破产风险
-
-
-class TraderStrategy(Enum):
-    """交易员策略"""
-    MOMENTUM = "momentum"           # 动量：追涨杀跌
-    VALUE = "value"                 # 价值：基于内在价值低买高卖
-    NOISE = "noise"                 # 噪声：随机交易（散户行为）
-    MARKET_MAKER = "market_maker"   # 做市商：双向挂单，赚价差
-
-
-# ─── 居民异质性参数 ───────────────────────────────────────────
-
-# 三层收入分位：低(0-33%) / 中(33-67%) / 高(67-100%)
-INCOME_TIER_PARAMS = {
-    "low": dict(
-        mpc=0.80,        # 凯恩斯：低收入MPC≈0.8，赚100花80
-        risk_aversion=0.9,   # 高风险厌恶，偏好储蓄
-        stock_buy_prob=0.05,
-        stock_sell_prob=0.02,
-        initial_cash_range=(30, 100),
-        skill_weights={0: 0.7, 1: 0.25, 2: 0.05},  # 低收入：70%低技能
-    ),
-    "middle": dict(
-        mpc=0.50,        # 中等收入MPC≈0.5
-        risk_aversion=0.5,
-        stock_buy_prob=0.10,
-        stock_sell_prob=0.06,
-        initial_cash_range=(100, 250),
-        skill_weights={0: 0.3, 1: 0.50, 2: 0.20},
-    ),
-    "high": dict(
-        mpc=0.20,        # 高收入MPC≈0.2，赚100花20
-        risk_aversion=0.2,    # 低风险厌恶，愿意投资
-        stock_buy_prob=0.25,
-        stock_sell_prob=0.15,
-        initial_cash_range=(250, 600),
-        skill_weights={0: 0.05, 1: 0.35, 2: 0.60},  # 高收入：60%高技能
-    ),
-}
-
-# ─── 企业异质性参数 ───────────────────────────────────────────
-
-INDUSTRY_PARAMS = {
-    Industry.MANUFACTURING: dict(
-        capital_intensity=2.0,     # 资本密集度（影响边际成本）
-        price_flexibility=0.3,    # 价格调整速度（价格粘性：低→慢）
-        wage_premium=1.0,         # 工资溢价（相对基准）
-        productivity_noise=2.5,    # 生产率波动
-        div_ratio=0.03,           # 分红比例（低：留存利润扩产）
-        layoff_prob=0.05,         # 裁员概率（经济差时）
-    ),
-    Industry.SERVICE: dict(
-        capital_intensity=0.5,     # 轻资产
-        price_flexibility=0.5,     # 价格较灵活
-        wage_premium=0.9,
-        productivity_noise=1.5,
-        div_ratio=0.06,
-        layoff_prob=0.03,
-    ),
-    Industry.TECH: dict(
-        capital_intensity=0.3,    # 低资本，高研发
-        price_flexibility=0.7,    # 高灵活性
-        wage_premium=1.5,         # 科技人才溢价
-        productivity_noise=4.0,   # 高波动（技术突破/失败）
-        div_ratio=0.02,           # 科技股少分红（高增长留存）
-        layoff_prob=0.08,         # 快速裁员调整
-    ),
-}
-
-# 企业生命周期权重
-LIFECYCLE_WEIGHTS = {
-    FirmLifecycle.STARTUP: 0.15,
-    FirmLifecycle.GROWTH: 0.30,
-    FirmLifecycle.MATURE: 0.40,
-    FirmLifecycle.DECLINE: 0.15,
-}
-
-# ─── 银行异质性参数 ───────────────────────────────────────────
-
-BANK_PARAMS = {
-    "aggressive": dict(   # 风险偏好型银行
-        risk_appetite=0.8,
-        lending_spread=0.05,   # 高利差：基准+5%
-        default_tolerance=0.7, # 高容忍坏账
-        loan_amount=30.0,       # 大额放贷
-        initial_reserves=1200.0,
-    ),
-    "conservative": dict(  # 保守型银行
-        risk_appetite=0.3,
-        lending_spread=0.01,   # 低利差：基准+1%
-        default_tolerance=0.3,
-        loan_amount=15.0,
-        initial_reserves=800.0,
-    ),
-}
-
-# ─── 核心模型参数 ───────────────────────────────────────────
-
-DEFAULTS = dict(
-    n_households=25,
-    n_firms=12,
-    n_banks=2,
-    n_traders=20,
-    # ── 政策参数 ──────────────────────────────────────
-    tax_rate=0.15,             # 所得税率
-    capital_gains_tax=0.10,     # 资本利得税率
-       # 基准利率
-    # min_wage 已废除v4.0
-    productivity=1.0,           # 全要素生产率（TFP）
-    subsidy=0.0,                # 失业补贴
-    gov_purchase=0.0,          # 政府购买（新增）
-    qe_amount=0.0,              # 量化宽松规模（新增）
-    # ── 劳动力市场 ────────────────────────────────────
-    job_search_cost=1.0,        # 求职现金消耗（摩擦成本）
-    wage_bargain_strength=0.2, # 工资议价强度
-    skill_wage_premium_high=0.5,  # 高技能工资溢价（+50%）
-    skill_wage_premium_mid=0.2,   # 中技能溢价（+20%）
-    # ── 信贷市场 ──────────────────────────────────────
-    credit_score_min=300,
-    credit_score_max=850,
-    collateral_ratio=0.7,      # 抵押品折价率
-    default_loss_rate=0.6,     # 违约损失率（银行实际损失比例）
-    # ── 金融市场 ─────────────────────────────────────
-    gordon_growth=0.02,         # 永续增长率（股价锚）
-    price_stickiness=0.3,      # 价格粘性：30%企业每轮调价
-    vol_window=10,             # 波动率滚动窗口
-    # ── 外部冲击 ──────────────────────────────────────
-    shock_prob=0.02,            # 每轮外生冲击概率
-    # ── 宏观锚点 ──────────────────────────────────────
-    gdp_target=1800.0,
-    price_adjust_speed=0.08,
-    stock_adjust_speed=0.025,
-    # ── 风险参数 ──────────────────────────────────────
-    default_threshold=0.5,
-    bankruptcy_cycles=3,        # 连续N轮负现金流→破产
-)
-
 
 # ══════════════════════════════════════════════════════════════
-# 工具函数
+# Layer 0: SFC 物理法则层 — 中央账本 + 政府/央行
 # ══════════════════════════════════════════════════════════════
 
-def _clamp(val: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, val))
+class Government:
+    """政府与央行实体：统一接收税收、发放补贴、执行QE"""
+    def __init__(self):
+        self.unique_id = "GOV_CB"
+        self.cash = 0.0  # 真实金库（替代 govt_wallet）
+        self.total_printed_money = 0.0  # 记录央行合法印钞量
 
 
-def _safe_div(a: float, b: float, default: float = 0.0) -> float:
-    return a / b if b != 0 else default
+class Ledger:
+    """中央清算账本：全系统唯一合法的资金流转通道"""
+    def __init__(self, model):
+        self.model = model
+
+    def transfer(self, sender, receiver, amount: float, memo: str = "",
+                 allow_overdraft: bool = False) -> bool:
+        """原子化转账：sender_bal < amount 时返回 False（除非 allow_overdraft）"""
+        if amount <= 0:
+            return False
+        # 自动识别资金字段（Bank用reserves，其余用cash）
+        sender_attr = 'reserves' if hasattr(sender, 'reserves') else 'cash'
+        receiver_attr = 'reserves' if hasattr(receiver, 'reserves') else 'cash'
+
+        sender_bal = getattr(sender, sender_attr)
+        if not allow_overdraft and sender_bal < amount:
+            return False  # 余额不足，严禁透支
+
+        # 原子化转账
+        setattr(sender, sender_attr, sender_bal - amount)
+        receiver_bal = getattr(receiver, receiver_attr)
+        setattr(receiver, receiver_attr, receiver_bal + amount)
+        return True
+
+    def print_money(self, amount: float) -> None:
+        """央行合法印钞：增加政府现金并记录"""
+        if amount <= 0:
+            return
+        self.model.government.cash += amount
+        self.model.government.total_printed_money += amount
 
 
-def _draw_income_tier(rng: np.random.Generator) -> str:
-    """帕累托加权抽取收入层（高收入抽取概率低，符合真实分布）"""
-    r = rng.random()
-    if r < 0.33:
-        return "low"
-    elif r < 0.67:
-        return "middle"
-    else:
-        return "high"
+class _MarketPool:
+    """虚拟代理：股市流动性池（有cash属性，可被Ledger操作）"""
+    def __init__(self):
+        self.cash = 0.0
 
 
-def _draw_industry(rng: np.random.Generator) -> Industry:
-    r = rng.random()
-    if r < 0.40:
-        return Industry.MANUFACTURING
-    elif r < 0.75:
-        return Industry.SERVICE
-    else:
-        return Industry.TECH
-
-
-def _draw_lifecycle(rng: np.random.Generator) -> FirmLifecycle:
-    r = rng.random()
-    cum = 0.0
-    for stage, w in LIFECYCLE_WEIGHTS.items():
-        cum += w
-        if r < cum:
-            return stage
-    return FirmLifecycle.MATURE
-
-
-def _draw_trader_strategy(rng: np.random.Generator) -> TraderStrategy:
-    r = rng.random()
-    if r < 0.35:
-        return TraderStrategy.MOMENTUM
-    elif r < 0.55:
-        return TraderStrategy.VALUE
-    elif r < 0.80:
-        return TraderStrategy.NOISE
-    else:
-        return TraderStrategy.MARKET_MAKER
-
-
-# ══════════════════════════════════════════════════════════════
-# 外部冲击事件
-# ══════════════════════════════════════════════════════════════
-
-class Shock(Enum):
-    """外生冲击类型"""
-    OIL_CRISIS = "oil_crisis"
-    TECH_BREAKTHROUGH = "tech_breakthrough"
-    DEMAND_SLOWDOWN = "demand_slowdown"
-    TRADE_WAR = "trade_war"
-    BANKING_PANIC = "banking_panic"
-    RECOVERY = "recovery"
-
-
-SHOCK_EFFECTS = {
-    Shock.OIL_CRISIS: {
-        "desc": "石油危机：生产成本暴涨",
-        "productivity": lambda p: p * 0.70,
-        "stock_sentiment": -0.15,   # 股市情绪负面
-        "consumption_delta": -0.10, # 消费意愿下降
-    },
-    Shock.TECH_BREAKTHROUGH: {
-        "desc": "技术突破：TFP大幅提升",
-        "productivity": lambda p: p * 1.40,
-        "stock_sentiment": 0.20,
-        "consumption_delta": 0.05,
-    },
-    Shock.DEMAND_SLOWDOWN: {
-        "desc": "需求骤降（如疫情）",
-        "productivity": lambda p: p * 0.85,
-        "stock_sentiment": -0.20,
-        "consumption_delta": -0.30,
-    },
-    Shock.TRADE_WAR: {
-        "desc": "贸易战：出口中断",
-        "productivity": lambda p: p * 0.90,
-        "stock_sentiment": -0.10,
-        "consumption_delta": 0.02,  # 国内替代消费微增
-    },
-    Shock.BANKING_PANIC: {
-        "desc": "银行恐慌：储户挤兑",
-        "stock_sentiment": -0.25,
-        "consumption_delta": -0.05,
-        "bank_run": True,          # 触发银行挤兑
-    },
-    Shock.RECOVERY: {
-        "desc": "经济复苏：需求回暖",
-        "productivity": lambda p: p * 1.15,
-        "stock_sentiment": 0.15,
-        "consumption_delta": 0.15,
-    },
-}
-
-
-# ══════════════════════════════════════════════════════════════
 # 代理人
 # ══════════════════════════════════════════════════════════════
 
@@ -766,49 +530,46 @@ class Household(Agent):
     # ── 子行为 ─────────────────────────────────────────────
 
     def earn_wage(self, amount: float) -> None:
-        """领取工资（由 Firm.pay_wages 调用，不再凭空加钱）"""
+        """记录工资收入（现金由 Ledger 转入，此处仅记录）"""
         if amount <= 0:
             return
-        self.cash += amount
         self.income_history.append(amount)
         if len(self.income_history) > 12:
             self.income_history.pop(0)
 
     def pay_taxes(self) -> None:
-        """缴纳个人所得税"""
+        """缴纳个人所得税（通过 Ledger 转入政府金库）"""
         if self.salary <= 0:
             return
         tax = self.salary * self.model.tax_rate
-        self.cash -= tax
-        self.model._collect_tax(tax)
+        if tax > 0 and self.model.ledger.transfer(self, self.model.government, tax):
+            self.model._collect_tax(tax)
 
     def repay_loan(self) -> None:
-        """定期偿还贷款（含利息）—— 资金闭环到银行准备金"""
+        """定期偿还贷款（含利息）—— 通过 Ledger 资金闭环到银行准备金"""
         if self.loan_principal <= 0:
             return
         rate = 0.05
         interest = self.loan_principal * rate
         repayment = min(max(2.0, self.cash * 0.05), self.loan_principal + interest)
         if self.cash >= repayment:
-            self.cash -= repayment
-            self.loan_principal = max(0.0, self.loan_principal - max(0.0, repayment - interest))
             # 资金闭环：还款进入银行准备金
             if self.model.banks:
                 bank = self.random.choice(self.model.banks)
-                bank.reserves += repayment
+                if self.model.ledger.transfer(self, bank, repayment):
+                    self.loan_principal = max(0.0, self.loan_principal - max(0.0, repayment - interest))
 
     def deposit(self) -> None:
-        """存款：MPC越高→存款比例越低（高收入存更多）"""
+        """存款：MPC越高→存款比例越低（高收入存更多）—— 通过 Ledger"""
         if self.cash <= 5:
             return
         # 高MPC（低收入）几乎不存款；低MPC（高收入）存款更多
         deposit_rate = (1 - self.mpc) * 0.3
         deposit = self.cash * deposit_rate
         if deposit > 1 and self.model.banks:
-            self.cash -= deposit
             bank = self.random.choice(self.model.banks)
-            bank.reserves += deposit
-            bank.deposits += deposit
+            if self.model.ledger.transfer(self, bank, deposit):
+                bank.deposits += deposit
 
     def _should_consume(self) -> bool:
         """效用最大化消费决策：
@@ -832,12 +593,12 @@ class Household(Agent):
 
     def consume(self) -> None:
         """
-        搜寻匹配消费（消费者驱动）：
+        搜寻匹配消费（消费者驱动）—— 全程通过 Ledger
         
         1. 消费意愿由 MPC + 效用函数决定
         2. 消费者随机搜寻最多3家有库存的企业
         3. 选择最低价的企业购买（需有足够现金）
-        4. 完整复式簿记：消费者现金 → 企业收入 + 政府税收
+        4. 复式簿记：消费者现金 → 企业收入 → 企业交销售税给政府
         """
         if not self._should_consume():
             return
@@ -858,30 +619,31 @@ class Household(Agent):
         if self.cash < best_firm.price:
             return
 
-        # 复式簿记（M0 守恒）：
-        # 1. 消费者支付
-        self.cash -= best_firm.price
+        # Ledger 复式簿记（M0 守恒）：
+        # 1. 消费者支付 → 企业收入
+        if not self.model.ledger.transfer(self, best_firm, best_firm.price):
+            return
         # 2. 企业库存-1
         best_firm.inventory -= 1
-        # 3. 现金流：消费者支付 → 企业收入 + 政府税收
+        # 3. 企业缴纳销售税给政府
         tax = best_firm.price * self.model.tax_rate
-        after_tax = best_firm.price * (1 - self.model.tax_rate)
-        best_firm.cash += after_tax
-        self.model._collect_tax(tax)
+        if tax > 0:
+            if self.model.ledger.transfer(best_firm, self.model.government, tax):
+                self.model._collect_tax(tax)
         # 4. 城际贸易追踪
         if self.city != best_firm.city:
             from model import City
             if best_firm.city == City.CITY_A:
-                self.model.city_a_exports += after_tax
-                self.model.city_b_imports += after_tax
+                self.model.city_a_exports += best_firm.price - tax
+                self.model.city_b_imports += best_firm.price - tax
             else:
-                self.model.city_b_exports += after_tax
-                self.model.city_a_imports += after_tax
+                self.model.city_b_exports += best_firm.price - tax
+                self.model.city_a_imports += best_firm.price - tax
         # 5. 统计本轮消费量（供 GDP 计算）
         self.goods += 1
 
     def invest(self) -> None:
-        """股票投资：风险厌恶决定是否参与股市"""
+        """股票投资：风险厌恶决定是否参与股市 —— 通过 Ledger"""
         price = self.model.stock_price
         # 风险厌恶高→几乎不参与
         if self.random.random() > (1 - self.risk_aversion) * 0.5 + 0.1:
@@ -890,13 +652,12 @@ class Household(Agent):
         if self.cash >= price * 2 and self.random.random() < self.stock_buy_prob:
             shares_bought = 2
             cost = price * shares_bought
-            self.cash -= cost
-            self.model.market_cash_pool += cost  # 买方出资进市场池
-            # 更新移动平均成本
-            total_cost = self.cost_basis * self.shares_owned + cost
-            self.shares_owned += shares_bought
-            self.cost_basis = total_cost / self.shares_owned if self.shares_owned > 0 else 0.0
-            self.model.buy_orders += shares_bought
+            if self.model.ledger.transfer(self, self.model._market_pool, cost):
+                # 更新移动平均成本
+                total_cost = self.cost_basis * self.shares_owned + cost
+                self.shares_owned += shares_bought
+                self.cost_basis = total_cost / self.shares_owned if self.shares_owned > 0 else 0.0
+                self.model.buy_orders += shares_bought
         # 卖出（资本利得税）
         elif self.shares_owned > 1 and self.random.random() < self.stock_sell_prob:
             shares_sold = 1
@@ -905,49 +666,29 @@ class Household(Agent):
             capital_gain = max(0.0, proceeds - cost)
             tax = capital_gain * self.model.capital_gains_tax
             # 从市场池取款（池不足则削减收益）
-            available = self.model.market_cash_pool
-            if available >= proceeds:
-                self.model.market_cash_pool -= proceeds
-                actual = proceeds
-            else:
-                actual = available
-                self.model.market_cash_pool = 0.0
-            self.cash += actual - tax
-            self.model._collect_tax(tax)
+            available = self.model._market_pool.cash
+            actual = min(available, proceeds)
+            if actual > 0:
+                self.model.ledger.transfer(self.model._market_pool, self, actual)
+            # 支付资本利得税
+            if tax > 0 and self.cash >= tax:
+                if self.model.ledger.transfer(self, self.model.government, tax):
+                    self.model._collect_tax(tax)
             self.model.capital_gains_tax_revenue += tax
             self.shares_owned -= shares_sold
             # 成本基准不变（平均成本法）
             self.model.sell_orders += shares_sold
 
     def search_job(self) -> None:
-        """找工作（摩擦性失业：消耗现金→政府服务费）"""
+        """找工作（摩擦性失业）：求职成本→政府，实际招聘由 Firm.hire() 统一处理"""
         if self.employed:
             return
-        # 求职现金消耗（摩擦成本→政府就业服务费）
+        # 求职成本（摩擦成本→政府就业服务费）—— 通过 Ledger
         cost = DEFAULTS["job_search_cost"]
         if self.cash > cost:
-            self.cash -= cost
-            self.model.govt_wallet += cost   # M0 中性：现金→政府
-
-        if self.model.firms and self.random.random() < 0.35:
-            # 按技能等级匹配岗位
-            candidates = [
-                f for f in self.model._cache.get('firms_with_jobs', [])
-                if f.wage_offer >= self.reservation_wage
-            ]
-            if candidates:
-                firm = self.random.choice(candidates)
-                if firm.open_positions > 0:          # 实时校验：缓存可能过期
-                    firm.open_positions -= 1
-                    firm.employees += 1              # 修复：必须同步增加员工数
-                    self.employed = True
-                    self.employer = firm
-                # 工资议价：失业率越高，议价能力越弱
-                ur = self.model.unemployment
-                wpremium = DEFAULTS["skill_wage_premium_mid"] if self.skill_level == 1 \
-                    else DEFAULTS["skill_wage_premium_high"] if self.skill_level == 2 else 0.0
-                wage = firm.wage_offer * (1 - ur * DEFAULTS["wage_bargain_strength"]) * (1 + wpremium)
-                self.salary = max(self.reservation_wage, wage)
+            self.model.ledger.transfer(self, self.model.government, cost)
+        # 求职成功率：35%（有岗位就能找到）
+        # 实际招聘（修改 employees/open_positions）由 Firm.hire() 统一处理
 
     def update_wealth(self) -> None:
         """财富 = 现金 - 负债 + 股票市值"""
@@ -976,8 +717,7 @@ class Household(Agent):
         migrate_score = unemp_diff * 3 + wage_diff * 0.5
         if migrate_score > 0.15 and self.random.random() < 0.5:
             self.city = other_city
-            self.cash -= 50  # 迁移成本
-            self.model.govt_wallet += 50  # M0 中性：现金→政府
+            self.model.ledger.transfer(self, self.model.government, 50)  # M0 中性：现金→政府
             self.employed = False  # 摩擦性失业
             self.employer = None
 
@@ -1001,9 +741,8 @@ class Household(Agent):
         if len(self.model.firms) >= 40:
             return
 
-        # 启动资金
+        # 启动资金 —— 通过 Ledger 转入新企业
         startup_cost = min(self.cash * 0.6, 500)
-        self.cash -= startup_cost
 
         # 选择行业（高技能→偏向科技/服务）
         industry_weights = {
@@ -1021,7 +760,8 @@ class Household(Agent):
         new_firm.industry = industry
         new_firm._ind = INDUSTRY_PARAMS[industry]
         new_firm.wage_offer = 8.0 * new_firm._ind["wage_premium"]
-        new_firm.cash = startup_cost
+        new_firm.cash = 0.0  # 先清零，由 Ledger 转入
+        self.model.ledger.transfer(self, new_firm, startup_cost)
         self.model.firms.append(new_firm)
         self.model.agents.add(new_firm)
 
@@ -1132,7 +872,7 @@ class Firm(Agent):
     # ── 子行为 ─────────────────────────────────────────────
 
     def hire(self) -> None:
-        """招聘（受生命周期驱动：初创/衰退企业风格不同）"""
+        """招聘（受生命周期驱动：初创/衰退企业风格不同）—— 统一招聘入口"""
         if self.open_positions <= 0:
             return
         unemployed = self.model.unemployed_households
@@ -1144,14 +884,22 @@ class Firm(Agent):
 
         n_hire = min(self.open_positions, len(candidates))
         for _ in range(n_hire):
-            if candidates:
-                h = self.random.choice(candidates)
-                h.employed = True
-                h.employer = self
-                h.salary = self.wage_offer
-                self.employees += 1
-                self.open_positions -= 1
-                candidates.remove(h)
+            if not candidates:
+                break
+            h = self.random.choice(candidates)
+
+            # 工资议价（失业率越高，工人议价能力越弱）
+            ur = self.model.unemployment
+            wpremium = (DEFAULTS["skill_wage_premium_mid"] if h.skill_level == 1
+                else DEFAULTS["skill_wage_premium_high"] if h.skill_level == 2 else 0.0)
+            wage = self.wage_offer * (1 - ur * DEFAULTS["wage_bargain_strength"]) * (1 + wpremium)
+            h.salary = max(h.reservation_wage, wage)
+
+            h.employed = True
+            h.employer = self
+            self.employees += 1
+            self.open_positions -= 1
+            candidates.remove(h)
 
     def produce(self) -> None:
         """
@@ -1270,7 +1018,7 @@ class Firm(Agent):
         self.price_change_cooldown = self.random.randint(1, 3)
 
     def pay_wages(self) -> None:
-        """复式簿记工资发放：企业现金 → 员工现金（资金闭环）"""
+        """复式簿记工资发放：企业现金 → 员工现金（通过 Ledger）"""
         if self.employees <= 0:
             return
         my_employees = [
@@ -1287,13 +1035,13 @@ class Firm(Agent):
         ratio = min(1.0, self.cash / total_wage)
         for h in my_employees:
             wage = h.salary * ratio
-            self.cash -= wage
-            h.earn_wage(wage)
+            if wage > 0 and self.model.ledger.transfer(self, h, wage):
+                h.earn_wage(wage)
             # 同步 BalanceSheet
             self._bs.cash = self.cash
 
     def pay_dividend(self) -> None:
-        """生命周期决定分红率：成熟期高分红，初创期不分（资金闭环到股东）"""
+        """生命周期决定分红率：成熟期高分红，初创期不分（通过 Ledger）"""
         if self.cash <= 50:
             return
         div_ratio = self._ind["div_ratio"]
@@ -1305,12 +1053,11 @@ class Firm(Agent):
         profit = self.cash * div_ratio
         if profit <= 0:
             return
-        self.cash -= profit
-        self._bs.cash = self.cash
+
         self.dividend_per_share = _safe_div(profit, 50)
         self.model.total_dividends += profit
 
-        # 资金闭环：分红给持有股票的 Trader 和 Household
+        # 分红给持有股票的 Trader 和 Household（通过 Ledger）
         shareholders = []
         total_shares = 0
         for t in self.model.traders:
@@ -1324,7 +1071,13 @@ class Firm(Agent):
         if total_shares > 0:
             div_per_share = profit / total_shares
             for s in shareholders:
-                s.cash += (s.shares if hasattr(s, 'shares') else s.shares_owned) * div_per_share
+                shares_held = s.shares if hasattr(s, 'shares') else s.shares_owned
+                amount = shares_held * div_per_share
+                if amount > 0:
+                    self.model.ledger.transfer(self, s, amount)
+
+        # 同步 BalanceSheet（Ledger 已扣减 self.cash）
+        self._bs.cash = self.cash
 
     def update_wage(self) -> None:
         """行业 + 生命周期决定工资调整策略"""
@@ -1336,29 +1089,42 @@ class Firm(Agent):
             self.wage_offer = _clamp(self.wage_offer * 1.04, 2.0, 50.0)
 
     def adjust_workforce(self) -> None:
-        """生命周期 + 经济状态决定裁员/扩产"""
+        """生命周期 + 经济状态决定裁员/扩产：
+        - 库存积压（inventory > production * 0.8）→ 裁员
+        - 库存不足（inventory < production * 0.3）且现金充足 → 扩招
+        """
         if self.employees == 0:
             return
-        # 衰退期或库存严重过剩时裁员
+
+        # ── 裁员逻辑（库存严重积压才裁）───────────────────────
         layoff_prob = self._ind["layoff_prob"]
         if self.lifecycle == FirmLifecycle.DECLINE:
             layoff_prob *= 2.0
-        if self.inventory < 2:
+        # 修复：需要显著积压（inventory > production * 3）才裁员
+        # 否则每步都触发（production 初始为 0，inventory > 0 故永远满足）
+        if self.production > 1 and self.inventory > self.production * 3.0:
             layoff_prob *= 3.0
 
         if self.random.random() < layoff_prob:
-            n_layoff = min(self.employees, self.random.randint(1, 3))
-            # 随机裁一名员工
             employed = self.model._cache.get('employees_of', {}).get(self.unique_id, [])
-            if employed:
-                h = self.random.choice(employed)
+            if not employed:
+                return
+            # 修复：n_layoff 与实际辞退人数匹配
+            n_layoff = min(len(employed), self.random.randint(1, 3))
+            to_layoff = self.random.sample(employed, n_layoff)
+            for h in to_layoff:
                 h.employed = False
                 h.employer = None
                 h.salary = 0.0
-                self.employees -= n_layoff
+            self.employees -= n_layoff
+
+        # ── 扩招逻辑（库存低 + 现金充足）────────────────────
+        if (self.production > 0 and self.inventory < self.production * 0.3
+                and self.cash > self.wage_offer * 2):
+            self.open_positions += 1
 
     def apply_for_loan(self) -> None:
-        """申请贷款（有信用审核）"""
+        """申请贷款（有信用审核）—— 通过 Ledger"""
         if self.loan_principal >= DEFAULTS.get("loan_cap", 500.0):
             return
         wage_bill = self.employees * self.wage_offer
@@ -1374,25 +1140,22 @@ class Firm(Agent):
         if loan <= 0:
             return
 
-        self.cash += loan
         self.loan_principal += loan
         self.model.total_loans_outstanding += loan
         if self.model.banks:
             bank = self.random.choice(self.model.banks)
             bank.total_loans += loan
-            bank.reserves -= loan
+            # 通过 Ledger：银行准备金 → 企业现金
+            self.model.ledger.transfer(bank, self, loan)
 
     def repay_loan(self) -> None:
         """
-        偿还贷款 + 违约判定（修复负现金漏洞）
-        
-        Bug 修复：原代码 repayment = min(interest + 5, self.cash)
-        当 self.cash 为负时，repayment 变为负数，导致 cash -= 负数 = 现金增加。
+        偿还贷款 + 违约判定（通过 Ledger）
         """
         if self.loan_principal <= 0:
             return
         
-        # 修复：现金为负时不能还款
+        # 现金为负时不能还款
         if self.cash <= 0:
             if self.random.random() < self.default_probability:
                 self._trigger_default()
@@ -1409,19 +1172,25 @@ class Firm(Agent):
         
         if repayment <= 0:
             return
-        
-        if self.cash >= repayment:
-            self.cash -= repayment
-            self.loan_principal -= max(0.0, repayment - interest)
-            # 资金闭环：还款进入银行准备金
-            if self.model.banks:
-                bank = self.random.choice(self.model.banks)
-                bank.reserves += repayment
-            # 同步 BalanceSheet
-            self._bs.cash = self.cash
-            self._bs.loan_principal = self.loan_principal
-        elif self.random.random() < self.default_probability:
-            self._trigger_default()
+
+        # 通过 Ledger：企业现金 → 银行准备金
+        if self.model.banks:
+            bank = self.random.choice(self.model.banks)
+            if self.model.ledger.transfer(self, bank, repayment):
+                self.loan_principal -= max(0.0, repayment - interest)
+                self._bs.cash = self.cash
+                self._bs.loan_principal = self.loan_principal
+            elif self.random.random() < self.default_probability:
+                self._trigger_default()
+        else:
+            # 无银行时的后备处理
+            if self.cash >= repayment:
+                self.cash -= repayment
+                self.loan_principal -= max(0.0, repayment - interest)
+                self._bs.cash = self.cash
+                self._bs.loan_principal = self.loan_principal
+            elif self.random.random() < self.default_probability:
+                self._trigger_default()
 
     def _trigger_default(self) -> None:
         """违约触发：同步通知银行，增加全系统风险"""
@@ -1545,8 +1314,7 @@ class Firm(Agent):
         migrate_score = tax_diff * 5 + labor_diff * 2
         if migrate_score > 0.05 and self.random.random() < 0.3:
             self.city = other_city
-            self.cash -= 200  # 迁移成本
-            self.model.govt_wallet += 200  # M0 中性：现金→政府
+            self.model.ledger.transfer(self, self.model.government, 200)  # M0 中性：现金→政府
             # 20% 员工离职
             if self.employees > 0:
                 n_quit = max(1, int(self.employees * 0.2))
@@ -1612,27 +1380,23 @@ class Bank(Agent):
 
     def pay_deposit_interest(self) -> None:
         """
-        支付存款利息（复式簿记）：
-          - 银行资产端：准备金减少
-          - 银行负债端：存款不变（利息已支付）
-          - 储户资产端：现金增加（利息收入）
-          
-        资金守恒：利息从银行准备金流向储户现金，系统内现金总量不变。
+        支付存款利息（通过 Ledger）：
+          银行准备金 → 储户现金，M0 守恒。
         """
         if self.deposits <= 0:
             return
             
-        rate = self.deposit_rate  # 存款利率通常低于基准
+        rate = self.deposit_rate
         total_interest = self.deposits * rate
         
         # 确保银行有足够的准备金支付利息
-        total_interest = min(total_interest, self.reserves * 0.1)  # 最多支付准备金的10%
+        total_interest = min(total_interest, self.reserves * 0.1)
         if total_interest <= 0:
             return
         
         # 按存款比例分配给储户
         depositors = list(self.model.households) + list(self.model.firms)
-        total_deposits = sum(getattr(d, 'cash', 0) for d in depositors)  # 简化：现金=存款
+        total_deposits = sum(getattr(d, 'cash', 0) for d in depositors)
         
         if total_deposits <= 0:
             return
@@ -1641,25 +1405,16 @@ class Bank(Agent):
             deposit = getattr(d, 'cash', 0)
             if deposit > 0:
                 share = (deposit / total_deposits) * total_interest
-                # 复式簿记：
-                # 1. 银行准备金减少
-                self.reserves -= share
-                # 2. 储户现金增加（利息收入）
-                d.cash += share
-                # 资金守恒：银行准备金↓ = 储户现金↑ ✓
+                if share > 0:
+                    self.model.ledger.transfer(self, d, share)
 
         # 同步 BalanceSheet
         self._bs.reserves = self.reserves
 
     def lend(self) -> None:
         """
-        复式簿记放贷：
-          - 银行资产端：+贷款债权（对借款人）
-          - 银行负债端：-准备金（现金减少）
-          - 借款人资产端：+现金
-          - 借款人负债端：+贷款债务
-          
-        资金守恒：系统内现金总量不变，只是从银行准备金转移到借款人手中。
+        复式簿记放贷（通过 Ledger）：
+          银行准备金 → 借款人现金，M0 不变。
         """
         if self.reserves <= 50:
             return
@@ -1668,11 +1423,9 @@ class Bank(Agent):
         capital_ratio = self.capital / max(1.0, self.total_loans)
         if capital_ratio < 0.08:
             # 低于8%：强制收缩（巴塞尔III）
-            # 收回部分贷款（从有现金的借款人那里）
             for borrower_id, loan_amount in list(self._loans.items()):
                 if loan_amount <= 0:
                     continue
-                # 找到借款人（用 unique_id 匹配）
                 borrower = None
                 for h in self.model.households:
                     if h.unique_id == borrower_id:
@@ -1684,14 +1437,13 @@ class Bank(Agent):
                             borrower = f
                             break
                 if borrower and borrower.cash >= loan_amount * 0.3:
-                    # 提前收回30%
+                    # 提前收回30% —— 通过 Ledger
                     repay = loan_amount * 0.3
-                    borrower.cash -= repay
-                    borrower.loan_principal -= repay
-                    self._loans[borrower_id] -= repay
-                    self.reserves += repay
-                    self.total_loans -= repay
-                    self.model.total_loans_outstanding -= repay
+                    if self.model.ledger.transfer(borrower, self, repay):
+                        borrower.loan_principal -= repay
+                        self._loans[borrower_id] -= repay
+                        self.total_loans -= repay
+                        self.model.total_loans_outstanding -= repay
             return
 
         borrowers = list(self.model.households) + list(self.model.firms)
@@ -1717,19 +1469,16 @@ class Bank(Agent):
             if amount <= 0:
                 continue
 
-            # ═══ 复式簿记：贷款创造存款 ═══
-            # 1. 银行资产端：增加贷款债权（用 unique_id 避免 id() 复用导致鬼魂债务）
+            # ═══ 复式簿记：贷款创造存款（通过 Ledger）═══
+            # 1. 银行资产端：增加贷款债权
             self._loans[b.unique_id] = self._loans.get(b.unique_id, 0) + amount
             self.total_loans += amount
             self.model.total_loans_outstanding += amount
             
-            # 2. 银行负债端：减少准备金（现金流出）
-            self.reserves -= amount
+            # 2. 通过 Ledger：银行准备金 → 借款人现金
+            self.model.ledger.transfer(self, b, amount)
             
-            # 3. 借款人资产端：增加现金
-            b.cash += amount
-            
-            # 4. 借款人负债端：增加贷款债务
+            # 3. 借款人负债端：增加贷款债务
             b.loan_principal = existing + amount
 
             # 同步 BalanceSheet
@@ -1737,10 +1486,7 @@ class Bank(Agent):
             self._bs.loans_outstanding = self.total_loans
             if not hasattr(b, 'creditor_bank') or not b.creditor_bank:
                 b.creditor_bank = set()
-            b.creditor_bank.add(id(self))  # 记录债主银行（id(self) 对 Bank 实例是稳定的）
-            
-            # 资金守恒验证：系统内现金总量不变
-            # 银行准备金减少 = 借款人现金增加 ✓
+            b.creditor_bank.add(id(self))
 
     def update_bad_debts(self) -> None:
         """
@@ -1884,13 +1630,12 @@ class Trader(Agent):
 
         if self.cash >= price * 2 and self.random.random() < buy_prob:
             cost = price * 2
-            self.cash -= cost
-            m.market_cash_pool += cost  # 买方出资进市场池
-            # 移动平均成本基准
-            old_cost = self.cost_basis * self.shares
-            self.shares += 2
-            self.cost_basis = (old_cost + cost) / self.shares
-            m.buy_orders += 2
+            if m.ledger.transfer(self, m._market_pool, cost):
+                # 移动平均成本基准
+                old_cost = self.cost_basis * self.shares
+                self.shares += 2
+                self.cost_basis = (old_cost + cost) / self.shares
+                m.buy_orders += 2
 
         # 止损（全卖）
         prev = m.prev_stock_price
@@ -1900,7 +1645,7 @@ class Trader(Agent):
             self._sell(1, price)
 
     def _trade_value(self, price: float) -> None:
-        """价值投资：内在价值低估则买，高估则卖"""
+        """价值投资：内在价值低估则买，高估则卖 —— 通过 Ledger"""
         m = self.model
         # 戈登模型估计内在价值
         avg_div_per_share = m.total_dividends / max(1, len(m.firms) * 50)
@@ -1910,46 +1655,42 @@ class Trader(Agent):
 
         # 折价20%以上 → 买入；溢价20%以上 → 卖出
         if price < self.intrinsic_value_estimate * 0.80 and self.cash >= price:
-            self.cash -= price
-            m.market_cash_pool += price  # 买方出资进市场池
-            self.shares += 1
-            # 移动平均成本基准
-            total_cost = self.cost_basis * (self.shares - 1) + price
-            self.cost_basis = total_cost / self.shares
-            m.buy_orders += 1
+            if m.ledger.transfer(self, m._market_pool, price):
+                self.shares += 1
+                # 移动平均成本基准
+                total_cost = self.cost_basis * (self.shares - 1) + price
+                self.cost_basis = total_cost / self.shares
+                m.buy_orders += 1
         elif price > self.intrinsic_value_estimate * 1.20 and self.shares > 0:
             self._sell(1, price)
 
     def _trade_noise(self, price: float) -> None:
-        """噪声交易：随机买卖（模拟散户非理性行为）"""
+        """噪声交易：随机买卖（模拟散户非理性行为）—— 通过 Ledger"""
         m = self.model
         if self.cash >= price and self.random.random() < 0.2:
             cost = price
-            self.cash -= cost
-            m.market_cash_pool += cost  # 买方出资进市场池
-            total_cost = self.cost_basis * self.shares + cost
-            self.shares += 1
-            self.cost_basis = total_cost / self.shares
-            m.buy_orders += 1
+            if m.ledger.transfer(self, m._market_pool, cost):
+                total_cost = self.cost_basis * self.shares + cost
+                self.shares += 1
+                self.cost_basis = total_cost / self.shares
+                m.buy_orders += 1
         if self.shares > 0 and self.random.random() < 0.18:
             self._sell(1, price)
 
     def _trade_market_maker(self, price: float) -> None:
-        """做市商：双向挂单，赚取买卖价差"""
+        """做市商：双向挂单，赚取买卖价差 —— 通过 Ledger"""
         m = self.model
         spread = self.bid_ask_spread
         bid = price * (1 - spread)
         ask = price * (1 + spread)
 
-        # 市价单：假设买卖均按当前价格成交
         # 买入
         if self.cash >= ask and self.random.random() < 0.4:
-            self.cash -= ask
-            m.market_cash_pool += ask  # 买方出资进市场池
-            self.shares += 1
-            total_cost = self.cost_basis * (self.shares - 1) + ask
-            self.cost_basis = total_cost / self.shares
-            m.buy_orders += 1
+            if m.ledger.transfer(self, m._market_pool, ask):
+                self.shares += 1
+                total_cost = self.cost_basis * (self.shares - 1) + ask
+                self.cost_basis = total_cost / self.shares
+                m.buy_orders += 1
         # 卖出
         if self.shares > 0 and self.random.random() < 0.4:
             self._sell(1, bid)
@@ -1967,7 +1708,7 @@ class Trader(Agent):
             self._trade_market_maker(price)
 
     def _sell(self, n: int, price: float) -> None:
-        """卖出 n 股，含资本利得税，从市场流动性池收款（M0 闭环）"""
+        """卖出 n 股，含资本利得税，从市场流动性池收款（通过 Ledger）"""
         if n <= 0 or self.shares < n:
             return
         proceeds = price * n
@@ -1976,17 +1717,15 @@ class Trader(Agent):
         tax = gain * self.model.capital_gains_tax
 
         # 从市场流动性池取款（M0 闭环：池不够则削减收益）
-        available = self.model.market_cash_pool
-        if available >= proceeds:
-            self.model.market_cash_pool -= proceeds
-            actual_proceeds = proceeds
-        else:
-            # 池不足：按比例削减收益（市场深度不足）
-            actual_proceeds = available  # 只能拿到池里剩下的
-            self.model.market_cash_pool = 0.0
+        available = self.model._market_pool.cash
+        actual = min(available, proceeds)
+        if actual > 0:
+            self.model.ledger.transfer(self.model._market_pool, self, actual)
 
-        self.cash += actual_proceeds - tax
-        self.model._collect_tax(tax)
+        # 支付资本利得税
+        if tax > 0 and self.cash >= tax:
+            if self.model.ledger.transfer(self, self.model.government, tax):
+                self.model._collect_tax(tax)
         self.model.capital_gains_tax_revenue += tax
         # 已实现收益累计（不含税）
         self.realized_gains += gain - tax
@@ -2111,13 +1850,15 @@ class EconomyModel(Model):
         # ── 政府财政 ───────────────────────────────────────
         self.govt_revenue: float = 0.0
         self.govt_expenditure: float = 0.0
-        self.govt_wallet: float = 0.0              # 真实现金池（替代纯计数器）
+        # ── Layer 0: SFC 物理法则 ──────────────────────
+        self.government = Government()
+        self.ledger = Ledger(self)
 
         # ── 股市流动性池（买方出资、卖方收款，M0 守恒） ───
-        self.market_cash_pool: float = 0.0
+        self._market_pool = _MarketPool()
 
         # ── SFC 审计 ───────────────────────────────────────
-        self._initial_m0: float = 0.0              # 记录初始 M0
+        self._initial_m0: float = 0.0              # 将在 setup 后计算
 
         # ── 信贷市场 ───────────────────────────────────────
         self.total_loans_outstanding: float = 0.0
@@ -2181,6 +1922,19 @@ class EconomyModel(Model):
 
         for _ in range(n_firm):
             f = Firm(self)
+            # 初始员工分配（打破 employees=0 的死循环）
+            n_init = self.random.randint(3, 6)
+            candidates = list(self.households)
+            for _ in range(n_init):
+                if not candidates:
+                    break
+                h = self.random.choice(candidates)
+                candidates.remove(h)
+                h.employed = True
+                h.employer = f
+                h.salary = f.wage_offer
+                f.employees += 1
+                f.open_positions = 0
             self.agents.add(f)
             self.firms.append(f)
 
@@ -2231,6 +1985,16 @@ class EconomyModel(Model):
         # ── 运行时缓存（Phase 0A 优化）──────────────────────────
         self._cache: dict = {}
         self._refresh_cache()  # 初始化缓存
+        self._initial_m0 = self._calc_m0()  # 记录初始 M0 基准
+
+    @property
+    def market_cash_pool(self) -> float:
+        """股市流动性池（兼容旧接口）"""
+        return self._market_pool.cash
+
+    @market_cash_pool.setter
+    def market_cash_pool(self, value: float) -> None:
+        self._market_pool.cash = value
 
     def _refresh_cache(self) -> None:
         """在每个 step 末尾刷新查找缓存，将 O(n²) 遍历降为 O(1) 查找"""
@@ -2323,12 +2087,13 @@ class EconomyModel(Model):
 
         if effect.get("bank_run", False):
             self.systemic_risk = min(1.0, self.systemic_risk + 0.2)
-            for h in self.households:
-                if h.cash > 0:
-                    withdraw = h.cash * 0.3
-                    h.cash -= withdraw
-                    for b in self.banks:
-                        b.reserves -= withdraw
+            for b in self.banks:
+                run_amount = b.reserves * 0.3
+                if run_amount > 0:
+                    b.deposits -= run_amount
+                    per_capita = run_amount / max(1, len(self.households))
+                    for h in self.households:
+                        self.ledger.transfer(b, h, per_capita)
 
         sentiment = effect.get("stock_sentiment", 0.0)
         self.systemic_risk = min(1.0, self.systemic_risk + abs(sentiment) * 0.1)
@@ -2372,51 +2137,53 @@ class EconomyModel(Model):
         if callable(prod_delta):
             self.productivity = _clamp(prod_delta(self.productivity), 0.1, 5.0)
 
-        # 银行恐慌：挤兑提取（银行储备→居民现金，M0 不变）
+        # 银行恐慌：挤兑提取（银行储备→居民现金，M0 不变）—— 通过 Ledger
         if effect.get("bank_run", False):
             self.systemic_risk = min(1.0, self.systemic_risk + 0.2)
             for b in self.banks:
                 run_amount = b.reserves * 0.3
                 if run_amount > 0:
-                    b.reserves -= run_amount
                     b.deposits -= run_amount
-                    # 随机分配给居民
+                    # 随机分配给居民 —— 通过 Ledger
                     per_capita = run_amount / max(1, len(self.households))
                     for h in self.households:
-                        h.cash += per_capita
+                        self.ledger.transfer(b, h, per_capita)
 
         # 系统性风险累计
         sentiment = effect.get("stock_sentiment", 0.0)
         self.systemic_risk = min(1.0, self.systemic_risk + abs(sentiment) * 0.1)
 
     def _gov_activity(self) -> None:
-        """政府活动：购买商品（G→GDP）、发放补贴（从 govt_wallet 支出）"""
+        """政府活动：购买商品（G→GDP）、发放补贴（通过 Ledger 从 government.cash 支出）"""
         total_spending = 0.0
 
-        # 政府购买（向企业采购，拉动总需求）
+        # 政府购买（向企业采购，拉动总需求）—— 通过 Ledger
         firms = self.firms
         if self.gov_purchase > 0 and firms:
             purchase_per_firm = self.gov_purchase / len(firms)
             for f in firms:
-                f.cash += purchase_per_firm
+                self.ledger.transfer(self.government, f, purchase_per_firm,
+                                     allow_overdraft=True)
                 f.inventory -= min(f.inventory, purchase_per_firm / f.price)
             total_spending += self.gov_purchase
 
-        # 失业补贴
+        # 失业补贴 —— 通过 Ledger（允许政府赤字）
         n_unemp = len(self.unemployed_households)
         total_subsidy = self.subsidy * n_unemp
         for h in self.unemployed_households:
-            h.cash += self.subsidy
+            self.ledger.transfer(self.government, h, self.subsidy,
+                                 allow_overdraft=True)
         total_spending += total_subsidy
 
         self.govt_expenditure = total_spending
-        # 政府支出：从金库扣减（允许赤字，金库可为负）
-        self.govt_wallet -= total_spending
         # 统计：收入 - 支出 = 净财政余额
         self.govt_revenue -= total_spending
 
         # 量化宽松：央行直接购买股票（推高股价，合法印钞）
         if self.qe_amount > 0 and self.traders:
+            self.ledger.print_money(self.qe_amount)
+            self.ledger.transfer(self.government, self._market_pool, self.qe_amount,
+                                 allow_overdraft=True)
             self.stock_price += self.qe_amount / len(self.traders) * 0.01
 
     def _clear_markets(self) -> None:
@@ -2547,46 +2314,42 @@ class EconomyModel(Model):
     # ── 政府金库 helper ────────────────────────────────────
 
     def _collect_tax(self, amount: float) -> None:
-        """统一税收入口：同时更新统计值和真实金库"""
+        """统一税收入口：更新统计值（现金通过 Ledger 流入 government.cash）"""
         self.govt_revenue += amount
-        self.govt_wallet += amount
+        # 注意：现金流转由调用方通过 ledger.transfer 完成，此处不再操作 govt_wallet
 
     # ── SFC 资金守恒审计 ─────────────────────────────────
 
     def _calc_m0(self) -> float:
         """计算当前系统 M0（所有现金 + 银行准备金 + 政府金库 + 股市池）"""
-        total = self.govt_wallet + self.market_cash_pool
+        total = self.government.cash + self._market_pool.cash
         total += sum(h.cash for h in self.households)
         total += sum(f.cash for f in self.firms)
         total += sum(b.reserves for b in self.banks)
         total += sum(t.cash for t in self.traders)
         return total
 
-    def audit_sfc(self) -> float:
-        """SFC（Stock-Flow Consistent）资金守恒审计
+    def audit_sfc(self) -> None:
+        """Layer 0: 绝对物理法则锁（SFC 审计）
 
-        返回 M0 漂移量。在 step() 末尾调用。
-        允许的合法 M0 变动源：
-          - 政府赤字（govt_wallet 变负 = 财政扩张）
-          - 银行放贷（reserves↓ 但 cash↑ 给借款人，M0 不变）
-          - QE（央行凭空印钱）
+        任何绕过 Ledger 的私人加钱都会被立刻捕获。
+        合法 M0 变动源：央行印钞（total_printed_money）。
         """
-        current = self._calc_m0()
-        if self._initial_m0 == 0.0:
-            self._initial_m0 = current
+        current_m0 = self.government.cash + self._market_pool.cash
+        current_m0 += sum(h.cash for h in self.households)
+        current_m0 += sum(f.cash for f in self.firms)
+        current_m0 += sum(b.reserves for b in self.banks)
+        current_m0 += sum(t.cash for t in self.traders)
 
-        # 合法印钞：QE
-        qe_total = getattr(self, 'qe_amount', 0.0) * self.cycle if hasattr(self, 'qe_amount') else 0.0
-        expected = self._initial_m0 + qe_total
+        expected_m0 = self._initial_m0 + self.government.total_printed_money
 
-        diff = current - expected
-        # 允许 ±0.5 浮点误差
-        if abs(diff) > 0.5:
-            logger.warning(
-                "⚠️ SFC审计: 第%d轮 M0漂移 %+0.2f (初始%.2f → 当前%.2f)",
-                self.cycle, diff, self._initial_m0, current,
+        diff = current_m0 - expected_m0
+        if abs(diff) > 1e-3:  # 容忍极微小浮点误差
+            raise RuntimeError(
+                f"🚨 SFC致命崩溃: 第{self.cycle}轮 M0漂移 {diff:+0.4f}！\n"
+                f"初始总资金: {self._initial_m0:.4f} | 当前总资金: {current_m0:.4f}\n"
+                f"说明有代码绕过了 Ledger 进行私人加钱，必须立即排查！"
             )
-        return diff
 
     # ── 政策干预（UI 按钮调用） ─────────────────────────────
 
