@@ -369,14 +369,6 @@ class BalanceSheet:
     reserves: float = 0.0
     stocks_value: float = 0.0
 
-    @property
-    def liquid_assets(self) -> float:
-        return self.cash + self.deposits
-
-    @property
-    def equity(self) -> float:
-        return self.liquid_assets - self.loan_principal
-
 
 def transfer(sender_bs, receiver_bs, amount, sender_bank=None,
               receiver_bank=None, tax_rate=0.0, govt=None) -> float:
@@ -406,33 +398,6 @@ def transfer(sender_bs, receiver_bs, amount, sender_bank=None,
     else:
         receiver_bs.cash += net
     return net
-
-
-def bank_lend(bank, borrower_bs, amount) -> bool:
-    """贷款创造存款 — M1 扩张"""
-    if amount <= 0:
-        return False
-    bank.total_loans += amount
-    bank.deposits += amount
-    borrower_bs.deposits += amount
-    return True
-
-
-def bank_repay(bank, borrower_bs, principal, interest) -> float:
-    """还贷 — M1 收缩"""
-    total = principal + interest
-    if total <= 0 or borrower_bs.deposits <= 0:
-        return 0.0
-    if borrower_bs.deposits < total:
-        ratio = borrower_bs.deposits / total
-        principal *= ratio
-        interest *= ratio
-        total = principal + interest
-    borrower_bs.deposits -= total
-    bank.deposits -= total
-    bank.total_loans -= principal
-    bank.reserves += interest
-    return total
 
 
 # ══════════════════════════════════════════════════════════════
@@ -3144,19 +3109,3 @@ class EconomyModel(Model):
 
     def adjust_tax_rate(self, delta: float) -> None:
         self.tax_rate = _clamp(self.tax_rate + delta, 0.0, 0.45)
-
-    def adjust_subsidy(self, delta: float) -> None:
-        self.subsidy = _clamp(self.subsidy + delta, 0.0, 50.0)
-
-    def adjust_productivity(self, delta: float) -> None:
-        self.productivity = _clamp(self.productivity + delta, 0.1, 5.0)
-
-    def adjust_gov_purchase(self, delta: float) -> None:
-        """政府购买（扩张性财政政策）"""
-        self.gov_purchase = _clamp(self.gov_purchase + delta, 0.0, 200.0)
-
-    def adjust_capital_gains_tax(self, delta: float) -> None:
-        """资本利得税（抑制投机）"""
-        self.capital_gains_tax = _clamp(
-            getattr(self, "capital_gains_tax", 0.10) + delta, 0.0, 0.50
-        )
