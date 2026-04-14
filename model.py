@@ -339,6 +339,12 @@ from dataclasses import dataclass
 
 
 @dataclass
+# ══════════════════════════════════════════════════════════════════════════════
+#  LAYER 0 — 物理法则层 (PHYSICS)
+#  唯一资金流转通道：Ledger.transfer()
+#  禁止在此区域对任何 Agent 的 cash/reserves 做 + - 操作（除初始值）
+#  唯一例外：Ledger.transfer() 内部自动 round
+# ══════════════════════════════════════════════════════════════════════════════
 class BalanceSheet:
     """通用资产负债表 — v4.0 资金守恒地基"""
     cash: float = 0.0
@@ -484,7 +490,7 @@ class Ledger:
             return False  # 余额不足，严禁透支
 
         # 原子化转账
-        setattr(sender, sender_attr, sender_bal - amount)
+        setattr(sender, sender_attr, round(sender_bal - amount, 6))
         receiver_bal = getattr(receiver, receiver_attr)
         setattr(receiver, receiver_attr, receiver_bal + amount)
         return True
@@ -506,6 +512,12 @@ class _MarketPool:
 # 代理人
 # ══════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  LAYER 1 & 2 — 微观实体层 (AGENTS)
+#  Household · Firm · Bank · Trader
+#  所有资金操作必须通过 self.model.ledger.transfer()
+#  业务统计（税收/库存/工资）必须包裹在 ledger.transfer() 成功的 if 分支内
+# ══════════════════════════════════════════════════════════════════════════════
 class Household(Agent):
     """
     消费者 v3.0 - 异质性版本
@@ -1278,26 +1290,21 @@ class Firm(Agent):
         """
         if self.loan_principal <= 0:
             return
-        
-        # 现金为负时不能还款
+
         if self.cash <= 0:
             if self.random.random() < self.default_probability:
                 self._trigger_default()
             return
-        
+
         rate = 0.05
         interest = self.loan_principal * rate * 0.1
-        
-        # 应还 = 利息 + 部分本金
         target_repayment = interest + 5
-        # 实际还款 = min(目标, 现金)，确保非负
         repayment = min(target_repayment, self.cash)
         repayment = max(0, repayment)
-        
+
         if repayment <= 0:
             return
 
-        # 通过 Ledger：企业现金 → 银行准备金
         if self.model.banks:
             bank = self.random.choice(self.model.banks)
             if self.model.ledger.transfer(self, bank, repayment):
@@ -1307,9 +1314,8 @@ class Firm(Agent):
             elif self.random.random() < self.default_probability:
                 self._trigger_default()
         else:
-            # 无银行时的后备处理
-            if self.cash >= repayment:
-                self.cash -= repayment
+            # 无银行时仍必须走 Ledger（M0 守恒）
+            if self.model.ledger.transfer(self, self.model.government, repayment):
                 self.loan_principal -= max(0.0, repayment - interest)
                 self._bs.cash = self.cash
                 self._bs.loan_principal = self.loan_principal
@@ -2010,6 +2016,10 @@ def compute_unemployment(model: EconomyModel) -> float:
 # 经济模型
 # ══════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  LAYER 3 — 宏观引擎层 (MACRO)
+#  EconomyModel 主循环 + 统计指标 + 外部冲击
+# ══════════════════════════════════════════════════════════════════════════════
 class EconomyModel(Model):
     """
     主模型 v3.0
@@ -2629,28 +2639,45 @@ class EconomyModel(Model):
         return total
 
     def audit_sfc(self) -> None:
-        """Layer 0: 绝对物理法则锁（SFC 审计）
-
-        任何绕过 Ledger 的私人加钱都会被立刻捕获。
-        合法 M0 变动源：央行印钞（total_printed_money）。
-        """
-        current_m0 = self.government.cash + self._market_pool.cash
-        current_m0 += sum(h.cash for h in self.households)
-        current_m0 += sum(f.cash for f in self.firms)
-        current_m0 += sum(b.reserves for b in self.banks)
-        current_m0 += sum(t.cash for t in self.traders)
-
-        expected_m0 = self._initial_m0 + self.government.total_printed_money
-
-        diff = current_m0 - expected_m0
-        if abs(diff) > 1e-3:  # 容忍极微小浮点误差
+        # ── 致命 SFC 资金守恒审计 ─────────────────────────────
+        total = round(self.government.cash, 6)
+        total += round(self._market_pool.cash, 6)
+        for h in self.households:
+            total = round(total + h.cash, 6)
+        for f in self.firms:
+            total = round(total + f.cash, 6)
+        for b in self.banks:
+            total = round(total + b.reserves, 6)
+        for t in self.traders:
+            total = round(total + t.cash, 6)
+        drift = round(total - self._initial_m0, 6)
+        if abs(drift) > 1e-3:
             raise RuntimeError(
-                f"🚨 SFC致命崩溃: 第{self.cycle}轮 M0漂移 {diff:+0.4f}！\n"
-                f"初始总资金: {self._initial_m0:.4f} | 当前总资金: {current_m0:.4f}\n"
-                f"说明有代码绕过了 Ledger 进行私人加钱，必须立即排查！"
+                f'\u2620 SFC\u547d\u547d\u5d29\u6e83: \u7b2c{self.cycle}\u8f6e \u6f0f\u79fb{drift:+.4f}\uff01'
+                f'\u521d\u59cbM0={round(self._initial_m0,2):,.2f}|\u5f53\u524dM0={round(total,2):,.2f}'
             )
 
-    # ── 政策干预（UI 按钮调用） ─────────────────────────────
+        # M0 = 所有 Agent 现金 + 银行准备金 + 政府金库 + 股市池
+        # 允许误差 ≤ 1e-3（浮点精度容忍）
+        total = round(self.government.cash, 6)
+        total += round(self._market_pool.cash, 6)
+        for h in self.households:
+            total = round(total + h.cash, 6)
+        for f in self.firms:
+            total = round(total + f.cash, 6)
+        for b in self.banks:
+            total = round(total + b.reserves, 6)
+        for t in self.traders:
+            total = round(total + t.cash, 6)
+
+        drift = round(total - self._initial_m0, 6)
+        if abs(drift) > 1e-3:
+            init = round(self._initial_m0, 2)
+            raise RuntimeError(
+                f"🚨 SFC致命崩溃: 第{self.cycle}轮 漂移{drift:+.4f}！\n"
+                f"初始M0: {init:,.2f} | 当前M0: {round(total,2):,.2f}\n"
+                f"→ 有代码绕过了 Ledger 进行私人加/减钱！"
+            )
 
     def adjust_interest_rate(self, delta: float) -> None:
         """Policy transmission: adjust all banks' loan rates"""
