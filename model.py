@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Mesa 经济沙盘 - 核心模型 v4.7 (Layer 2/3 增强版)
+Mesa 经济沙盘 - 核心模型 v5.0 (四方向全部完成)
 基于 FRB/US · NAWM · ABCE 框架设计思路
 
 v4.0 三大战役：
@@ -60,12 +60,16 @@ CITY_PARAMS = {
         "wage_floor": 7.5,               # 最低工资
         "subsidy_rate": 0.10,          # 补贴率
         "infrastructure": 0.8,         # 基建水平（影响生产效率）
+        "base_rent": 2.0,             # 基础地租（居民/企业每轮缴）
+        "land_capacity": 20,          # 城市容量上限（超过后地租飙升）
     },
     City.CITY_B: {
         "corporate_tax_rate": 0.18,    # 企业税率（高税高福利）
         "wage_floor": 6.8,               # 最低工资（劳动力便宜）
         "subsidy_rate": 0.05,          # 补贴率
         "infrastructure": 1.0,         # 基建水平（科技发达）
+        "base_rent": 3.0,             # 科技城地租更贵
+        "land_capacity": 15,           # 更小的容量（土地稀缺）
     },
 }
 
@@ -420,11 +424,45 @@ def bank_repay(bank, borrower_bs, principal, interest) -> float:
 # ══════════════════════════════════════════════════════════════
 
 class Government:
-    """政府与央行实体：统一接收税收、发放补贴、执行QE"""
+    """政府与央行实体：统一接收税收、发放补贴、执行QE + 发行国债"""
     def __init__(self):
         self.unique_id = "GOV_CB"
-        self.cash = 0.0  # 真实金库（替代 govt_wallet）
+        self.cash = 0.0                 # 真实金库
         self.total_printed_money = 0.0  # 记录央行合法印钞量
+        # ── 国债属性 ──────────────────────────────
+        self.bonds_outstanding: float = 0.0    # 未偿还国债总额（票面价值）
+        self.bond_yield: float = 0.05          # 1年期国债收益率
+        self.bond_coupon: float = 0.05         # 票面利率（年化，每轮 = coupon/4）
+        self.bond_price: float = 100.0         # 动态债券价格 = par / (1+yield)
+        self.bond_market_rate: float = 0.05    # 市场化利率锚（= 国债收益率）
+        # ── MMT 政府融资状态 ───────────────────────
+        self.deficit: float = 0.0        # 本轮财政赤字（收入-支出）
+
+
+    def issue_bond(self, amount: float) -> bool:
+        """
+        发行国债（替代 allow_overdraft 直接印钱）：
+          政府发债 → 买方支付 bond_price × amount → 政府收到现金
+          国债作为政府负债，纳入 M0 计算时只计入"私人持有部分"
+        """
+        if amount <= 0:
+            return False
+        self.bonds_outstanding += amount
+        # 市场化融资：政府不凭空印钞，而是从市场借钱
+        return True
+
+    def update_bond_price(self) -> None:
+        """
+        债券定价：P = 100 / (1 + yield)
+        国债收益率 = 无风险基准利率 + 财政风险溢价
+        财政赤字大 → 信用担忧 → 收益率上升 → 价格下跌
+        """
+        # 财政风险溢价：每 100 元赤字 → +0.1% 收益率
+        fiscal_premium = max(0.0, -self.cash) / 1000.0
+        target_yield = self.bond_market_rate + fiscal_premium
+        self.bond_yield = 0.8 * self.bond_yield + 0.2 * target_yield
+        self.bond_yield = max(0.001, min(0.25, self.bond_yield))
+        self.bond_price = 100.0 / (1.0 + self.bond_yield)
 
 
 class Ledger:
@@ -591,53 +629,83 @@ class Household(Agent):
 
     def consume(self) -> None:
         """
-        搜寻匹配消费（消费者驱动）—— 全程通过 Ledger
-        
-        1. 消费意愿由 MPC + 效用函数决定
-        2. 消费者随机搜寻最多3家有库存的企业
-        3. 选择最低价的企业购买（需有足够现金）
-        4. 复式簿记：消费者现金 → 企业收入 → 企业交销售税给政府
+        拉式信贷消费 + 资产负债表衰退
+
+        核心逻辑：
+          1. 偿债优先（负债累累时缩减消费——资产负债表衰退核心）
+          2. MPC × 可支配收入决定消费预算
+          3. 现金不够时申请消费贷（高 MPC 才可申请——体现收入约束）
+          4. 搜寻最低价购买（最多看 3 家）
+          5. 复式簿记全程通过 Ledger
         """
         if not self._should_consume():
             return
 
-        # 搜寻匹配：从有库存企业中随机抽样最多3家
         firms_with_stock = self.model._cache.get('firms_with_stock', [])
         if not firms_with_stock:
             return
 
-        n_search = min(3, len(firms_with_stock))
-        candidates = self.random.sample(firms_with_stock, n_search) \
-            if n_search < len(firms_with_stock) else list(firms_with_stock)
+        best_firm = min(firms_with_stock, key=lambda f: f.price)
+        price = best_firm.price
 
-        # 选最低价
-        best_firm = min(candidates, key=lambda f: f.price)
+        # ── 偿债优先（资产负债表衰退）─────────────────────
+        # 债务/资产比越高 → 偿债优先级越高 → 消费被挤压
+        # 这是日本"失去的三十年"的核心机制：企业/居民有钱也不花
+        if self.loan_principal > 0:
+            debt_to_cash = self.loan_principal / max(self.cash, 1.0)
+            if debt_to_cash > 0.3:
+                # 债务超 30% 现金：优先还债，消费降半
+                effective_budget = self.cash * 0.5
+            elif debt_to_cash > 0.1:
+                effective_budget = self.cash * 0.8
+            else:
+                effective_budget = self.cash
+        else:
+            effective_budget = self.cash
 
-        # 检查支付能力
-        if self.cash < best_firm.price:
+        # ── 计算消费能力 ────────────────────────────────
+        # 收入 = 工资（有工作）或 失业保险（无工作）
+        income = self.salary if self.employed else getattr(self.model, 'subsidy', 0.0)
+        mpc_budget = effective_budget + income * self.mpc
+
+        shortfall = price - mpc_budget
+
+        # ── 申请消费贷（缺钱时主动申请）───────────────────
+        if shortfall > 1:
+            loan_cap = DEFAULTS.get("household_loan_cap", 200.0)
+            available = max(0.0, loan_cap - self.loan_principal)
+            loan_request = min(shortfall, available)
+            if loan_request > 1:
+                self.model._pending_loan_requests.append(
+                    (self, loan_request, "consumption")
+                )
+                mpc_budget += loan_request  # 假设贷到
+
+        # ── 执行购买（再次确认买得起）────────────────────
+        if mpc_budget < price:
+            return  # 贷不到或不够，放弃消费
+
+        # ── 复式簿记（M0 守恒）──────────────────────────
+        if not self.model.ledger.transfer(self, best_firm, price):
             return
-
-        # Ledger 复式簿记（M0 守恒）：
-        # 1. 消费者支付 → 企业收入
-        if not self.model.ledger.transfer(self, best_firm, best_firm.price):
-            return
-        # 2. 企业库存-1
         best_firm.inventory -= 1
-        # 3. 企业缴纳销售税给政府
-        tax = best_firm.price * self.model.tax_rate
+
+        # 销售税 → 政府
+        tax = price * self.model.tax_rate
         if tax > 0:
             if self.model.ledger.transfer(best_firm, self.model.government, tax):
                 self.model._collect_tax(tax)
-        # 4. 城际贸易追踪
+
+        # 城际贸易追踪
         if self.city != best_firm.city:
             from model import City
             if best_firm.city == City.CITY_A:
-                self.model.city_a_exports += best_firm.price - tax
-                self.model.city_b_imports += best_firm.price - tax
+                self.model.city_a_exports += price - tax
+                self.model.city_b_imports += price - tax
             else:
-                self.model.city_b_exports += best_firm.price - tax
-                self.model.city_a_imports += best_firm.price - tax
-        # 5. 统计本轮消费量（供 GDP 计算）
+                self.model.city_b_exports += price - tax
+                self.model.city_a_imports += price - tax
+
         self.goods += 1
 
     def invest(self) -> None:
@@ -864,10 +932,68 @@ class Firm(Agent):
         # 价格粘性：上次调价距今轮次
         self.price_change_cooldown: int = 0
 
+        # ── B2B 供应链（B2C 企业向 B2B 制造商购资本品）────────
+        self.is_b2b = (self.industry == Industry.MANUFACTURING)
+        # 资本品库存（B2B 制造/B2C 采购）
+        self.capital_goods_inventory: float = 200.0 if self.is_b2b else 0.0
+        self.capital_goods_price: float = 15.0   # 资本品单价（参考通胀调整）
+        self.capital_goods_sales: float = 0.0     # 本轮资本品销售额（B2B企业用）
+
         # 行业参数缓存
         self._ind = ip
 
     # ── 子行为 ─────────────────────────────────────────────
+
+    def buy_capital_goods(self) -> None:
+        """
+        B2B 供应链 + 牛鞭效应核心
+
+        B2C 企业（SERVICE/TECH）向 B2B 制造商（MANUFACTURING）购买资本品。
+
+        牛鞭效应传导路径：
+        居民消费稍微下降
+          → SERVICE 订单减少
+            → MANUFACTURING 库存积压 → 价格下跌
+              → MANUFACTURING 裁员/停产
+                → 制造业大萧条（1929 年真实场景）
+
+        实现：每轮 B2C 企业有一定概率购买资本品扩产。
+        """
+        if self.is_b2b:
+            return  # B2B 企业是卖方，不买
+        if self.capital_goods_inventory > 10:
+            return  # 已有充足资本品，暂不购
+
+        # 搜寻 B2B 制造商
+        b2b_firms = [f for f in self.model.firms
+                      if f.is_b2b and f.capital_goods_inventory > 0]
+        if not b2b_firms:
+            return
+
+        # 扩产意愿（库存低时更强）
+        expansion_urge = max(0.0, 5.0 - self.capital_goods_inventory) / 5.0
+        if self.random.random() > expansion_urge * 0.5:
+            return
+
+        # 选一家买
+        supplier = self.random.choice(b2b_firms)
+        unit_price = supplier.capital_goods_price
+        quantity = 1.0
+        total_cost = unit_price * quantity
+
+        if self.cash < total_cost:
+            return
+
+        # 复式簿记（M0 守恒）
+        if not self.model.ledger.transfer(self, supplier, total_cost):
+            return
+
+        supplier.capital_goods_inventory -= quantity
+        supplier.capital_goods_sales += total_cost
+        self.capital_goods_inventory += quantity
+
+        # B2C 企业扩产（资本品增加 → 产能提升）
+        self.capital_stock += quantity * 10.0  # 每单位资本品增加 10 点产能
 
     def hire(self) -> None:
         """招聘（受生命周期驱动：初创/衰退企业风格不同）—— 统一招聘入口"""
@@ -1106,6 +1232,19 @@ class Firm(Agent):
                 and self.cash > self.wage_offer * 3:
             self.open_positions += 1
 
+        # ── 运营贷申请（想扩招但现金不足）─────────────────
+        # 向银行申请运营贷，用于发放工资（利率由银行根据信用评分决定）
+        wage_need = self.open_positions * self.wage_offer
+        if self.open_positions > 0 and self.cash < wage_need:
+            shortfall = wage_need - self.cash
+            loan_cap = DEFAULTS.get("loan_cap", 500.0)
+            available = max(0.0, loan_cap - self.loan_principal)
+            loan_request = min(shortfall, available)
+            if loan_request > 1:
+                self.model._pending_loan_requests.append(
+                    (self, loan_request, "operational")
+                )
+
         # ── 裁员逻辑（受最低员工保护）───────────────────────
         if self.employees == 0:
             return
@@ -1132,31 +1271,6 @@ class Firm(Agent):
                         h.employer = None
                         h.salary = 0.0
                     self.employees -= n_layoff
-
-    def apply_for_loan(self) -> None:
-        """申请贷款（有信用审核）—— 通过 Ledger"""
-        if self.loan_principal >= DEFAULTS.get("loan_cap", 500.0):
-            return
-        wage_bill = self.employees * self.wage_offer
-        if self.cash >= wage_bill * 0.5:
-            return
-
-        # 信用评分决定是否批准
-        cs = getattr(self, "credit_score", 600)
-        if cs < 400:
-            return  # 信用太差，拒绝
-
-        loan = min(DEFAULTS.get("bank_loan_amount", 20.0), DEFAULTS.get("loan_cap", 500.0) - self.loan_principal)
-        if loan <= 0:
-            return
-
-        self.loan_principal += loan
-        self.model.total_loans_outstanding += loan
-        if self.model.banks:
-            bank = self.random.choice(self.model.banks)
-            bank.total_loans += loan
-            # 通过 Ledger：银行准备金 → 企业现金
-            self.model.ledger.transfer(bank, self, loan)
 
     def repay_loan(self) -> None:
         """
@@ -1289,6 +1403,7 @@ class Firm(Agent):
         if self.check_bankruptcy():
             return  # 已破产，不再执行
         self.hire()
+        self.buy_capital_goods()   # B2B 供应链：SERVICE/TECH 向 MANUFACTURING 购资本品
         self.produce()
         self.price_goods()
         self.pay_wages()       # 复式簿记：工资从企业流向员工
@@ -1297,7 +1412,6 @@ class Firm(Agent):
         self.adjust_workforce()
         self.update_default_probability()
         self.update_credit_score()
-        self.apply_for_loan()
         self.repay_loan()
         self.update_wealth()
         self._consider_migration()
@@ -1423,80 +1537,75 @@ class Bank(Agent):
 
     def lend(self) -> None:
         """
-        复式簿记放贷（通过 Ledger）：
-          银行准备金 → 借款人现金，M0 不变。
-        """
-        if self.reserves <= 50:
-            return
+        拉式信贷（Pull-based Credit）—— 废除推式放贷
 
-        # 资本金充足率检查（风险加权资产 = 贷款额 × 1.0）
+        执行逻辑：
+          1. 响应模型贷款申请队列（按申请顺序处理）
+          2. 资本金充足率 < 8% → 拒绝新申请（巴塞尔III）
+          3. 信用评分 < 400 → 拒贷
+          4. 每轮最多批准 max_loans 笔贷款
+          5. 消费贷优先级高于运营贷（流动性陷阱下银行惜贷）
+        """
+        # ── 资本金充足率检查 ───────────────────────────
         capital_ratio = self.capital / max(1.0, self.total_loans)
         if capital_ratio < 0.08:
-            # 低于8%：强制收缩（巴塞尔III）
-            for borrower_id, loan_amount in list(self._loans.items()):
-                if loan_amount <= 0:
-                    continue
-                borrower = None
-                for h in self.model.households:
-                    if h.unique_id == borrower_id:
-                        borrower = h
-                        break
-                if not borrower:
-                    for f in self.model.firms:
-                        if f.unique_id == borrower_id:
-                            borrower = f
-                            break
-                if borrower and borrower.cash >= loan_amount * 0.3:
-                    # 提前收回30% —— 通过 Ledger
-                    repay = loan_amount * 0.3
-                    if self.model.ledger.transfer(borrower, self, repay):
-                        borrower.loan_principal -= repay
-                        self._loans[borrower_id] -= repay
-                        self.total_loans -= repay
-                        self.model.total_loans_outstanding -= repay
+            # 低于8%：强制收缩，拒绝新申请（复式簿记不变）
             return
 
-        borrowers = list(self.model.households) + list(self.model.firms)
-        max_loans = min(3, len(borrowers))
+        if not self.model._pending_loan_requests:
+            return
 
-        for _ in range(max_loans):
-            if self.reserves <= self.loan_amount:
+        # ── 按优先级排序：消费贷 > 运营贷 ─────────────
+        requests = sorted(
+            self.model._pending_loan_requests,
+            key=lambda r: 0 if r[2] == "consumption" else 1
+        )
+
+        max_loans = min(4, len(requests))
+        approved = 0
+
+        for borrower, amount_requested, loan_type in requests:
+            if approved >= max_loans:
                 break
-            b = self.random.choice(borrowers)
-            existing = getattr(b, "loan_principal", 0.0)
-            cap = DEFAULTS.get("household_loan_cap", 200.0) if isinstance(b, Household) \
-                else DEFAULTS.get("loan_cap", 500.0)
-            if existing >= cap:
-                continue
 
-            # 信用审核
-            cs = getattr(b, "credit_score", 600)
+            if self.reserves <= 50:
+                break
+
+            # ── 信用审核 ─────────────────────────────
+            cs = getattr(borrower, "credit_score", 600)
             if cs < 400:
                 continue  # 拒贷
 
-            amount = self.loan_amount * (0.7 + self.risk_appetite * 0.6)
-            amount = min(amount, cap - existing)
+            # ── 贷款额度计算 ─────────────────────────
+            if isinstance(borrower, Household):
+                cap = DEFAULTS.get("household_loan_cap", 200.0)
+            else:
+                cap = DEFAULTS.get("loan_cap", 500.0)
+            existing = getattr(borrower, "loan_principal", 0.0)
+            available = max(0.0, cap - existing)
+            amount = min(amount_requested, available)
             if amount <= 0:
                 continue
 
-            # ═══ 复式簿记：贷款创造存款（通过 Ledger）═══
-            # 1. 银行资产端：增加贷款债权
-            self._loans[b.unique_id] = self._loans.get(b.unique_id, 0) + amount
+            # ── 复式簿记（M0 不变）──────────────────
+            # 银行准备金 → 借款人现金（M0 内部重分配）
+            self._loans[borrower.unique_id] = \
+                self._loans.get(borrower.unique_id, 0) + amount
             self.total_loans += amount
             self.model.total_loans_outstanding += amount
-            
-            # 2. 通过 Ledger：银行准备金 → 借款人现金
-            self.model.ledger.transfer(self, b, amount)
-            
-            # 3. 借款人负债端：增加贷款债务
-            b.loan_principal = existing + amount
 
-            # 同步 BalanceSheet
-            self._bs.reserves = self.reserves
-            self._bs.loans_outstanding = self.total_loans
-            if not hasattr(b, 'creditor_bank') or not b.creditor_bank:
-                b.creditor_bank = set()
-            b.creditor_bank.add(id(self))
+            if self.model.ledger.transfer(self, borrower, amount):
+                borrower.loan_principal = existing + amount
+
+                # 同步
+                if not hasattr(borrower, 'creditor_bank'):
+                    borrower.creditor_bank = set()
+                borrower.creditor_bank.add(id(self))
+                approved += 1
+
+        # 同步 BalanceSheet
+        self._bs.reserves = self.reserves
+        self._bs.loans_outstanding = self.total_loans
 
     def update_bad_debts(self) -> None:
         """
@@ -1543,10 +1652,58 @@ class Bank(Agent):
         self._bs.loans_outstanding = self.total_loans
         self._bs.deposits = self.deposits
 
+    def pay_bond_coupon(self) -> None:
+        """
+        银行持有政府债券，收取票息（国债利息从政府流向银行）
+        """
+        bonds_held = getattr(self, 'bonds_held', 0.0)
+        if bonds_held <= 0:
+            return
+        coupon = bonds_held * self.model.government.bond_coupon / 4.0  # 年化÷4
+        if coupon > 0:
+            self.model.ledger.transfer(self.model.government, self, coupon)
+
+    def invest_in_bonds(self) -> None:
+        """
+        国债投资：银行在"买国债"和"放贷"之间选择
+
+        crowding-out：当政府赤字高时发行大量国债 → 银行买债 → 准备金减少
+        → 银行放贷能力下降 → 企业难以获得贷款 → 投资减少
+
+        国债收益 = bond_coupon / bond_price（实际年化）
+        对比：放贷收益 = loan_rate（已含风险溢价）
+        """
+        pending = self.model._bond_buyers_pending
+        if pending <= 0:
+            return
+
+        gov = self.model.government
+        # 国债实际年化收益 = coupon_rate / bond_price × 100
+        bond_ye = gov.bond_coupon / gov.bond_price * 100.0
+        loan_ye = self.loan_rate  # 放贷年化利率
+
+        # 银行用 (reserves × risk_fraction) 参与购债 vs 放贷
+        investable = self.reserves * 0.3  # 30% 准备金用于资产配置
+
+        # 若国债收益率 > 放贷利率 → 倾向买债
+        # 财政健康时：买债更安全但收益低；财政紧张时：买债收益高但有违约风险
+        bond_attractiveness = bond_ye / max(loan_ye, 0.001)
+
+        if self.random.random() < bond_attractiveness and investable > 10:
+            # 买债：银行 cash → 政府 cash，政府债券 → 银行资产
+            cost = min(investable, pending)
+            if cost > 10:
+                price = cost * gov.bond_price / 100.0  # 实际支付
+                if self.model.ledger.transfer(self, gov, price):
+                    # 银行持有国债（票息收入来源）
+                    if not hasattr(self, 'bonds_held'):
+                        self.bonds_held = 0.0
+                    self.bonds_held += cost
+                    # 政府已发行债券（issue_bond 已记录）
+                    self.model._bond_buyers_pending = max(0.0, pending - cost)
+
     def step(self) -> None:
-        self._auto_adjust_rates()
-        self.pay_deposit_interest()
-        self.lend()
+        """Bank.step() 只做状态同步——lend/update_bad_debts 由 EconomyModel 统一调度"""
         self.update_bad_debts()
         self.update_wealth()
 
@@ -1761,6 +1918,36 @@ class Trader(Agent):
         self._bs.cash = self.cash
         self._bs.stocks_value = self.shares * self.model.stock_price
 
+    def invest_in_bonds(self) -> None:
+        """
+        交易员在股票和国债之间做资产配置：
+          - 国债收益率 > 股市预期收益 → 抛股买债
+          - 国债收益率低 → 买股
+        国债持有者收取票息（来自政府）
+        """
+        pending = self.model._bond_buyers_pending
+        if pending <= 0:
+            return
+
+        gov = self.model.government
+        bond_ye = gov.bond_coupon / gov.bond_price * 100.0  # 国债实际年化
+        stock_ye = self.model.stock_price / max(1.0, gov.bond_price)  # 股票预期收益（简化）
+
+        investable = self.cash * 0.2  # 最多 20% 现金配置国债
+        if investable < 10:
+            return
+
+        # 若国债收益率 > 股市预期收益 × 1.2 → 倾向买债
+        threshold = stock_ye * 1.2
+        if bond_ye > threshold and self.random.random() < 0.3:
+            cost = min(investable, pending)
+            price = cost * gov.bond_price / 100.0
+            if self.model.ledger.transfer(self, gov, price):
+                if not hasattr(self, 'bonds_held'):
+                    self.bonds_held = 0.0
+                self.bonds_held += cost
+                self.model._bond_buyers_pending = max(0.0, pending - cost)
+
     def step(self) -> None:
         self.trade()
         self.update_wealth()
@@ -1887,6 +2074,12 @@ class EconomyModel(Model):
         self.total_loans_outstanding: float = 0.0
         self.total_dividends: float = 0.0        # 单轮分红（每轮重置）
         self.all_dividends: float = 0.0          # 全量累计（永不清零，用于 Gordon 模型）
+        # ── 拉式信贷申请队列 ────────────────────────────────
+        # 每个请求：(requester, amount, loan_type)
+        # loan_type: "consumption" | "operational"
+        self._pending_loan_requests: list = []
+        # ── 国债发行待购队列 ───────────────────────────────
+        self._bond_buyers_pending: float = 0.0   # 本轮待发行的国债面值
 
         # ── 宏观指标 ───────────────────────────────────────
         self.gdp: float = 0.0
@@ -2048,35 +2241,151 @@ class EconomyModel(Model):
         # 0. 外部冲击
         self._apply_shock()
 
-        # 1. 银行
+        # 1. 银行：调整利率 + 支付存款利息
         for bank in self.banks:
-            bank.step()
+            bank._auto_adjust_rates()
+            bank.pay_deposit_interest()
+            bank.pay_bond_coupon()   # 支付国债利息（先于债券投资）
 
-        # 2. 企业
-        for firm in self.firms[:]:   # [:] 因为 step 内可能移除破产企业
+        # 2. 政府：计算赤字 → 发布国债 → 让银行决定是否购债
+        self._gov_issue_bonds()     # 发布债券（产生待购队列）
+        for bank in self.banks:
+            bank.invest_in_bonds()   # 银行决定：买债 vs 放贷（crowding-out 机制）
+        for trader in self.traders:
+            trader.invest_in_bonds()  # 交易员也可以买债
+
+        # 3. 政府：收到债券资金 → 执行支出
+        self._gov_spend()
+
+        # 4. 企业：生产 → 卖货 → 产生活动 → 发工资（可能产生贷款申请）
+        self._pending_loan_requests.clear()
+        for firm in self.firms[:]:
             firm.step()
 
-        # 3. 居民
+        # 5. 银行处理企业贷款申请（运营贷）
+        for bank in self.banks:
+            bank.lend()
+            bank.update_bad_debts()
+
+        # 6. 居民：领工资 → 缴税 → 还贷 → 存款 → 消费（可能产生消费贷申请）
         for hh in self.households:
             hh.step()
 
-        # 4. 交易者
+        # 7. 银行处理消费贷（优先级低于运营贷）
+        for bank in self.banks:
+            bank.lend()
+            bank.update_wealth()
+
+        # 8. 交易者：股票交易
         for trader in self.traders:
             trader.step()
 
-        # 5. 政府活动
-        self._gov_activity()
-
-        # 6. 宏观清算
+        # 9. 宏观清算
         self._clear_markets()
         self._compute_macro()
         self._collect_data()
 
-        # 7. SFC 资金守恒审计
+        # 10. SFC 资金守恒审计
         self.audit_sfc()
 
-        # 8. 刷新运行时缓存（Phase 0A）
+        # 11. 刷新运行时缓存
         self._refresh_cache()
+
+    # ── 国债发行 + 购买（方向二核心）──────────────────────────
+
+    def _gov_issue_bonds(self) -> None:
+        """
+        政府发行国债：先算赤字 → 发行债券 → 等待 Bank/Trader 购债
+        真实购债发生在 invest_in_bonds()，这里只发布债券
+        """
+        # 计算本轮支出需求（从上一轮 fiscal_balance 推导）
+        ur = self.unemployment
+        if ur > 0.15:
+            fm = 1.5
+        elif ur < 0.08:
+            fm = 0.5
+        else:
+            fm = 1.0
+        total_need = self.gov_purchase
+        n_unemp = len(self.unemployed_households)
+        total_need += self.subsidy * fm * n_unemp
+        if ur > 0.20 and self.firms:
+            total_need += min(sum(f.open_positions for f in self.firms), 3 * len(self.firms)) * 5.0
+
+        self.govt_expenditure = total_need
+        gov_cash = self.government.cash
+        deficit = max(0.0, total_need - gov_cash)
+
+        if deficit > 1.0:
+            # 发行面值 = 赤字 / 债券价格（折价发行）
+            face_value = deficit / max(0.3, self.government.bond_price) * 100.0
+            self.government.issue_bond(face_value)
+            self._bond_buyers_pending = face_value  # 待购债券总量
+        else:
+            self._bond_buyers_pending = 0.0
+
+    def _gov_spend(self) -> None:
+        """政府支出：花收到的债券资金 + 税收（量入为出）"""
+        firms = self.firms
+        ur = self.unemployment
+        if ur > 0.15:
+            fm = 1.5
+        elif ur < 0.08:
+            fm = 0.5
+        else:
+            fm = 1.0
+
+        if self.gov_purchase > 0 and firms:
+            per_firm = self.gov_purchase / len(firms)
+            for f in firms:
+                if self.ledger.transfer(self.government, f, per_firm):
+                    f.inventory -= min(f.inventory, per_firm / f.price)
+
+        eff_sub = self.subsidy * fm
+        for h in self.unemployed_households:
+            self.ledger.transfer(self.government, h, eff_sub)
+
+        if ur > 0.20 and firms:
+            for f in firms:
+                sub = min(f.open_positions, 3) * 5.0
+                if sub > 0:
+                    self.ledger.transfer(self.government, f, sub)
+
+        # 更新国债价格
+        self.government.update_bond_price()
+
+        # QE
+        if self.qe_amount > 0 and self.traders:
+            self.ledger.print_money(self.qe_amount)
+
+        # ── 地租收取（方向四：空间经济学）─────────────────
+        # 人口压力越大 → 地租越高（城市 B 更贵）
+        # 地租 = 基准地租 × 人口压力因子（>容量时爆发）
+        total_pop = len(self.households)
+        for city in [City.CITY_A, City.CITY_B]:
+            pop_city = sum(1 for h in self.households if h.city == city)
+            firms_city = sum(1 for f in self.firms if f.city == city)
+            params = CITY_PARAMS[city]
+            capacity = params["land_capacity"]
+            # 人口压力 = 当前人口 / 容量（>1表示过载）
+            pop_pressure = pop_city / max(1, capacity)
+            rent_multiplier = 1.0 + max(0.0, pop_pressure - 1.0) * 2.0  # 过载时地租翻倍
+            base_rent = params["base_rent"] * rent_multiplier
+
+            # 居民缴地租
+            for h in self.households:
+                if h.city == city:
+                    if self.ledger.transfer(h, self.government, base_rent):
+                        self._collect_tax(base_rent * 0.0)  # 地租不收税，只是转移
+            # 企业缴地租（运营成本的一部分）
+            for f in self.firms:
+                if f.city == city:
+                    firm_rent = base_rent * 2.0
+                    self.ledger.transfer(f, self.government, firm_rent)
+
+        # 财政统计
+        fiscal_balance = self.govt_revenue - self.govt_expenditure
+        self.government.deficit = max(0.0, -fiscal_balance)
 
         self.cycle += 1
 
@@ -2175,70 +2484,6 @@ class EconomyModel(Model):
         # 系统性风险累计
         sentiment = effect.get("stock_sentiment", 0.0)
         self.systemic_risk = min(1.0, self.systemic_risk + abs(sentiment) * 0.1)
-
-    def _gov_activity(self) -> None:
-        """
-        政府活动：购买商品 + 失业补贴 + 逆周期财政稳定器
-
-        逆周期财政：
-          - 失业率 > 15%：补贴 × 1.5（扩张性财政）
-          - 失业率 < 8%：补贴 × 0.5（收缩性财政）
-          - 财政赤字靠 allow_overdraft=True 融资
-        """
-        total_spending = 0.0
-
-        # ── 逆周期财政乘数 ───────────────────────────
-        ur = self.unemployment  # 失业率 ∈ [0,1]
-        if ur > 0.15:
-            fiscal_multiplier = 1.5   # 衰退：扩张财政
-        elif ur < 0.08:
-            fiscal_multiplier = 0.5   # 繁荣：收缩财政
-        else:
-            fiscal_multiplier = 1.0   # 正常区间
-
-        # ── 政府购买（向企业采购，拉动总需求）──────────
-        firms = self.firms
-        if self.gov_purchase > 0 and firms:
-            purchase_per_firm = self.gov_purchase / len(firms)
-            for f in firms:
-                self.ledger.transfer(self.government, f, purchase_per_firm,
-                                     allow_overdraft=True)
-                f.inventory -= min(f.inventory, purchase_per_firm / f.price)
-            total_spending += self.gov_purchase
-
-        # ── 失业补贴（逆周期）────────────────────────
-        n_unemp = len(self.unemployed_households)
-        effective_subsidy = self.subsidy * fiscal_multiplier
-        total_subsidy = effective_subsidy * n_unemp
-        for h in self.unemployed_households:
-            self.ledger.transfer(self.government, h, effective_subsidy,
-                                 allow_overdraft=True)
-        total_spending += total_subsidy
-
-        # ── 招聘补贴（逆周期：失业率高时补贴企业扩招）───────
-        # 失业率 > 20%：每新招一人，政府补贴企业 5 块钱（降低招聘成本）
-        if ur > 0.20 and self.firms:
-            hire_subsidy = 5.0
-            total_hire_subsidy = 0.0
-            for f in self.firms:
-                # 补贴在招聘时通过 Ledger 发放（每家企业最多补 3 人）
-                subsidy_per_firm = min(f.open_positions, 3) * hire_subsidy
-                if subsidy_per_firm > 0:
-                    self.ledger.transfer(self.government, f, subsidy_per_firm,
-                                         allow_overdraft=True)
-                    total_hire_subsidy += subsidy_per_firm
-            total_spending += total_hire_subsidy
-
-        self.govt_expenditure = total_spending
-        # 统计：收入 - 支出 = 净财政余额
-        self.govt_revenue -= total_spending
-
-        # ── 量化宽松：央行直接购买股票（合法印钞）────────
-        if self.qe_amount > 0 and self.traders:
-            self.ledger.print_money(self.qe_amount)
-            self.ledger.transfer(self.government, self._market_pool, self.qe_amount,
-                                 allow_overdraft=True)
-            self.stock_price += self.qe_amount / len(self.traders) * 0.01
 
     def _clear_markets(self) -> None:
         """股市 + 物价清算"""
