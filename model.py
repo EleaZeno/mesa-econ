@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Mesa 经济沙盘 - 核心模型 v4.6 (Layer 2/3 稳定器版)
+Mesa 经济沙盘 - 核心模型 v4.7 (Layer 2/3 增强版)
 基于 FRB/US · NAWM · ABCE 框架设计思路
 
 v4.0 三大战役：
@@ -192,7 +192,7 @@ DEFAULTS = dict(
        # 基准利率
     # min_wage 已废除v4.0
     productivity=1.0,           # 全要素生产率（TFP）
-    subsidy=5.0,                # 失业补贴（自动稳定器，防止需求塌缩）
+    subsidy=10.0,               # 失业补贴（自动稳定器，防止需求塌缩）
     gov_purchase=50.0,         # 政府购买（自动稳定器，拉动基础需求）
     qe_amount=0.0,              # 量化宽松规模（新增）
     # ── 劳动力市场 ────────────────────────────────────
@@ -572,24 +572,22 @@ class Household(Agent):
                 bank.deposits += deposit
 
     def _should_consume(self) -> bool:
-        """效用最大化消费决策：
-        - CES 效用：U = [α·G^(ρ-1)/ρ + (1-α)·C^(ρ-1)/ρ]^(ρ/(ρ-1))
-        - 比较消费的边际效用 vs 储蓄的边际效用
-        - 简化实现：基于现金缓冲、就业、价格水平的综合评分
-        """
-        # 现金充裕度：现金越多，越倾向消费
-        cash_buffer = min(1.0, self.cash / 100.0)
+        """收入驱动消费：无收入不消费；有收入时MPC决定消费概率"""
+        # 收入 = 工资（有工作）或 失业保险（无工作）
+        if self.employed:
+            income = self.salary
+        else:
+            income = getattr(self.model, 'subsidy', 0.0)
 
-        # 就业稳定性：有工作更敢消费
-        employment_bonus = 0.3 if self.employed else 0.0
+        # 无可支配收入 → 不消费
+        if income <= 0:
+            return False
 
-        # 价格惩罚：价格越高越克制消费
-        avg_price = self.model.avg_price
-        price_factor = max(0.0, 1.0 - (avg_price - 10.0) / 50.0) if avg_price > 10 else 1.0
-
-        # 综合消费倾向
-        propensity = self.mpc * cash_buffer * price_factor + employment_bonus
-        return self.random.random() < min(0.95, propensity)
+        # MPC 决定消费概率（替代旧概率触发）
+        # 现金少时倾向消费（流动性偏好）
+        cash_ratio = min(1.0, max(0.0, self.cash / 50.0))
+        propensity = self.mpc * (0.6 + 0.4 * cash_ratio)
+        return self.random.random() < propensity
 
     def consume(self) -> None:
         """
@@ -1092,22 +1090,33 @@ class Firm(Agent):
         """生命周期 + 经济状态决定裁员/扩产：
         - 库存积压 → 裁员（与绝对库存挂钩，不依赖 production 初始值）
         - 库存不足 + 现金充足 → 扩招
+        - 最低员工保护：始终保留 min(1, employees // 4) 人（打破裁员死循环）
+        - 就业锚：失业率 > 40% 时，企业现金充足则每轮强制开 1 岗（不受库存限制）
         """
-        # ── 扩招逻辑（库存低 + 现金充足，任何时候可触发）────
-        # 扩招不看 production（初始 production=0 会导致永远不扩招）
+        # ── 最低员工保护 ──────────────────────────────────────
+        min_staff = max(1, self.employees // 4)
+
+        # ── 就业锚：失业率高时强制扩招 ───────────────────────
+        ur = self.model.unemployment
+        if ur > 0.40 and self.employees >= 1 and self.cash > self.wage_offer * 2:
+            self.open_positions += 1
+
+        # ── 扩招逻辑（库存低 + 现金充足）───────────────────
         if self.employees > 0 and self.inventory < max(1.0, self.production) * 0.5 \
                 and self.cash > self.wage_offer * 3:
             self.open_positions += 1
 
-        # ── 裁员逻辑 ────────────────────────────────────────
+        # ── 裁员逻辑（受最低员工保护）───────────────────────
         if self.employees == 0:
             return
         employed = self.model._cache.get('employees_of', {}).get(self.unique_id, [])
         if not employed:
             return
 
-        # 用绝对库存判断（不受 production 初始值影响）
-        # 库存 > 3 * (employees * base_productivity) 才触发裁员
+        # 裁员上限：不低于最低员工数
+        max_layoff = max(0, len(employed) - min_staff)
+
+        # 库存严重积压才裁员：inventory > employees × 1.5 × 3 = employees × 4.5
         base_prod_per_worker = 1.5  # 每员工基准产出
         max_comfortable = self.employees * base_prod_per_worker
         if self.inventory > max_comfortable * 3.0:
@@ -1115,13 +1124,14 @@ class Firm(Agent):
             if self.lifecycle == FirmLifecycle.DECLINE:
                 layoff_prob *= 2.0
             if self.random.random() < layoff_prob:
-                n_layoff = min(len(employed), self.random.randint(1, 2))
-                to_layoff = self.random.sample(list(employed), n_layoff)
-                for h in to_layoff:
-                    h.employed = False
-                    h.employer = None
-                    h.salary = 0.0
-                self.employees -= n_layoff
+                n_layoff = min(max_layoff, self.random.randint(1, 2))
+                if n_layoff > 0:
+                    to_layoff = self.random.sample(list(employed), n_layoff)
+                    for h in to_layoff:
+                        h.employed = False
+                        h.employer = None
+                        h.salary = 0.0
+                    self.employees -= n_layoff
 
     def apply_for_loan(self) -> None:
         """申请贷款（有信用审核）—— 通过 Ledger"""
@@ -1490,26 +1500,39 @@ class Bank(Agent):
 
     def update_bad_debts(self) -> None:
         """
-        坏账 = Σ(本银行债务人违约概率 × 本银行对其贷款额 × 损失率)
-        修复：只统计自己发放的贷款，不越界统计其他银行的贷款
+        动态拨备 + 逆周期资本缓冲（Layer 3 金融稳定器）
+
+        1. 预期损失 = Σ(违约概率 × 贷款额 × 损失率)
+        2. 逆周期资本缓冲 = max(0, (系统风险 - 0.1) × 0.5 × 准备金)
+           （经济好时多提 buffer，差时释放）
         """
-        total = 0.0
+        # ── 1. 预期损失拨备 ───────────────────────────
+        total_expected_loss = 0.0
         for borrower_id, loan_principal in list(self._loans.items()):
-            # 从模型中查找对应债务人（用 unique_id 匹配）
             borrower = next(
                 (a for a in list(self.model.households) + list(self.model.firms)
                  if a.unique_id == borrower_id), None
             )
             if borrower is None:
-                # 债务人已消失（破产），全额计坏账
-                total += loan_principal * DEFAULTS["default_loss_rate"]
+                total_expected_loss += loan_principal * DEFAULTS["default_loss_rate"]
             else:
+                # 确保违约概率已更新
+                if hasattr(borrower, "update_default_probability"):
+                    borrower.update_default_probability()
                 prob = getattr(borrower, "default_probability", 0.0)
-                total += prob * loan_principal * DEFAULTS["default_loss_rate"]
-        self.bad_debts = total
+                total_expected_loss += prob * loan_principal * DEFAULTS["default_loss_rate"]
+        self.bad_debts = total_expected_loss
 
-        # 更新资本金（利润留存）
-        self.capital = max(self.capital * 0.99, self.reserves * 0.1)
+        # ── 2. 逆周期资本缓冲 ─────────────────────────
+        # 系统性风险高时（>10%）多提 buffer，经济衰退时缓冲累积
+        sys_risk = getattr(self.model, "systemic_risk", 0.0)
+        cyclical_buffer = max(0.0, (sys_risk - 0.1) * 0.5 * self.reserves)
+
+        # ── 3. 更新资本金（留存利润 + 缓冲）────────────
+        self.capital = max(
+            self.capital * 0.99,                                    # 自然衰减
+            self.reserves * 0.1 - cyclical_buffer,                  # 资本充足率 floor
+        )
 
     def update_wealth(self) -> None:
         """银行财富 = 准备金 + 有效贷款 - 坏账"""
@@ -2154,10 +2177,26 @@ class EconomyModel(Model):
         self.systemic_risk = min(1.0, self.systemic_risk + abs(sentiment) * 0.1)
 
     def _gov_activity(self) -> None:
-        """政府活动：购买商品（G→GDP）、发放补贴（通过 Ledger 从 government.cash 支出）"""
+        """
+        政府活动：购买商品 + 失业补贴 + 逆周期财政稳定器
+
+        逆周期财政：
+          - 失业率 > 15%：补贴 × 1.5（扩张性财政）
+          - 失业率 < 8%：补贴 × 0.5（收缩性财政）
+          - 财政赤字靠 allow_overdraft=True 融资
+        """
         total_spending = 0.0
 
-        # 政府购买（向企业采购，拉动总需求）—— 通过 Ledger
+        # ── 逆周期财政乘数 ───────────────────────────
+        ur = self.unemployment  # 失业率 ∈ [0,1]
+        if ur > 0.15:
+            fiscal_multiplier = 1.5   # 衰退：扩张财政
+        elif ur < 0.08:
+            fiscal_multiplier = 0.5   # 繁荣：收缩财政
+        else:
+            fiscal_multiplier = 1.0   # 正常区间
+
+        # ── 政府购买（向企业采购，拉动总需求）──────────
         firms = self.firms
         if self.gov_purchase > 0 and firms:
             purchase_per_firm = self.gov_purchase / len(firms)
@@ -2167,19 +2206,34 @@ class EconomyModel(Model):
                 f.inventory -= min(f.inventory, purchase_per_firm / f.price)
             total_spending += self.gov_purchase
 
-        # 失业补贴 —— 通过 Ledger（允许政府赤字）
+        # ── 失业补贴（逆周期）────────────────────────
         n_unemp = len(self.unemployed_households)
-        total_subsidy = self.subsidy * n_unemp
+        effective_subsidy = self.subsidy * fiscal_multiplier
+        total_subsidy = effective_subsidy * n_unemp
         for h in self.unemployed_households:
-            self.ledger.transfer(self.government, h, self.subsidy,
+            self.ledger.transfer(self.government, h, effective_subsidy,
                                  allow_overdraft=True)
         total_spending += total_subsidy
+
+        # ── 招聘补贴（逆周期：失业率高时补贴企业扩招）───────
+        # 失业率 > 20%：每新招一人，政府补贴企业 5 块钱（降低招聘成本）
+        if ur > 0.20 and self.firms:
+            hire_subsidy = 5.0
+            total_hire_subsidy = 0.0
+            for f in self.firms:
+                # 补贴在招聘时通过 Ledger 发放（每家企业最多补 3 人）
+                subsidy_per_firm = min(f.open_positions, 3) * hire_subsidy
+                if subsidy_per_firm > 0:
+                    self.ledger.transfer(self.government, f, subsidy_per_firm,
+                                         allow_overdraft=True)
+                    total_hire_subsidy += subsidy_per_firm
+            total_spending += total_hire_subsidy
 
         self.govt_expenditure = total_spending
         # 统计：收入 - 支出 = 净财政余额
         self.govt_revenue -= total_spending
 
-        # 量化宽松：央行直接购买股票（推高股价，合法印钞）
+        # ── 量化宽松：央行直接购买股票（合法印钞）────────
         if self.qe_amount > 0 and self.traders:
             self.ledger.print_money(self.qe_amount)
             self.ledger.transfer(self.government, self._market_pool, self.qe_amount,
