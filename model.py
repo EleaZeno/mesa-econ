@@ -35,6 +35,8 @@ Mesa 3.x 最佳实践：
 import logging
 from enum import Enum
 from typing import Optional
+import pickle
+import random
 
 import numpy as np
 from mesa import Agent, Model
@@ -345,8 +347,16 @@ from dataclasses import dataclass
 #  禁止在此区域对任何 Agent 的 cash/reserves 做 + - 操作（除初始值）
 #  唯一例外：Ledger.transfer() 内部自动 round
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  LAYER 0 — 物理法则层 (PHYSICS)
+#  BalanceSheet · Government · Ledger · _MarketPool
+#  唯一资金通道：Ledger.transfer()。禁止直接 + - Agent.cash
+#  唯一例外：Ledger.transfer() 内部已 round(6) 防漂移
+# ══════════════════════════════════════════════════════════════════════════════
+
+
 class BalanceSheet:
-    """通用资产负债表 — v4.0 资金守恒地基"""
+    """通用资产负债表 — v5.2 dataclass（NaN/Inf 防护由 Ledger 保证）"""
     cash: float = 0.0
     deposits: float = 0.0
     inventory: float = 0.0
@@ -481,18 +491,22 @@ class Ledger:
         """原子化转账：sender_bal < amount 时返回 False（除非 allow_overdraft）"""
         if amount <= 0:
             return False
-        # 自动识别资金字段（Bank用reserves，其余用cash）
+        # ── NaN/Inf 防护（Layer 0 物理法则守卫）────────────────
         sender_attr = 'reserves' if hasattr(sender, 'reserves') else 'cash'
         receiver_attr = 'reserves' if hasattr(receiver, 'reserves') else 'cash'
-
         sender_bal = getattr(sender, sender_attr)
+        receiver_bal = getattr(receiver, receiver_attr)
+        if sender_bal != sender_bal or abs(sender_bal) == float('inf') \
+                or receiver_bal != receiver_bal or abs(receiver_bal) == float('inf') \
+                or amount != amount or abs(amount) == float('inf'):
+            raise RuntimeError(f"Ledger.transfer 非法值: sender={sender_bal} receiver={receiver_bal} amount={amount}")
         if not allow_overdraft and sender_bal < amount:
             return False  # 余额不足，严禁透支
 
-        # 原子化转账
+        # 原子化转账（双端 round 防止浮点漂移）
         setattr(sender, sender_attr, round(sender_bal - amount, 6))
         receiver_bal = getattr(receiver, receiver_attr)
-        setattr(receiver, receiver_attr, receiver_bal + amount)
+        setattr(receiver, receiver_attr, round(receiver_bal + amount, 6))
         return True
 
     def print_money(self, amount: float) -> None:
@@ -2039,8 +2053,11 @@ class EconomyModel(Model):
       → 抛售资产 → 股价进一步↓（螺旋下行）
     """
 
-    def __init__(self, **kwargs):
-        super().__init__()
+    def __init__(self, seed: int = 42, **kwargs):
+        super().__init__(rng=seed)
+        # 确定性锁死：禁止 Mesa/Mesa Batch 在不同运行间产生差异
+        np.random.seed(seed)
+        random.seed(seed)
 
         # ── 参数注入 + 校验 ─────────────────────────────────
         for key, default_val in DEFAULTS.items():
@@ -2237,6 +2254,37 @@ class EconomyModel(Model):
             )(),
         }
 
+    # ── UI 快照 + 断点 ─────────────────────────────────────
+    def _make_ui_snapshot(self) -> dict:
+        """Plan 4: UI 只读快照（在 audit_sfc 之后生成，保证数据一致性）"""
+        return {
+            "cycle": self.cycle,
+            "gdp": round(self.gdp, 2),
+            "unemployment": round(self.unemployment, 4),
+            "gini": round(self.gini, 4),
+            "health_score": round(self.health_score, 1),
+            "stock_price": round(self.stock_price, 2),
+            "bond_yield": round(getattr(self.government, "bond_yield", 0.05) * 100, 2),
+            "bonds_outstanding": round(getattr(self.government, "bonds_outstanding", 0.0), 2),
+            "total_loans": round(self.total_loans_outstanding, 2),
+            "m0": round(self._calc_m0(), 2),
+            "m0_drift": round(self._calc_m0() - self._initial_m0, 6),
+            "bankrupt_count": self.bankrupt_count,
+            "current_shock": self.current_shock,
+        }
+
+    def _checkpoint(self) -> None:
+        """Plan 2: 每 500 轮序列化模型状态，供断点重载 debug"""
+        import os
+        if self.cycle <= 0:
+            return
+        cp_dir = os.path.join(os.path.dirname(__file__), "checkpoints")
+        os.makedirs(cp_dir, exist_ok=True)
+        if self.cycle % 500 == 0:
+            path = os.path.join(cp_dir, f"model_step_{self.cycle}.pkl")
+            with open(path, "wb") as f:
+                pickle.dump(self, f)
+
     # ── 属性代理 ───────────────────────────────────────────
 
     @property
@@ -2300,6 +2348,7 @@ class EconomyModel(Model):
 
         # 11. 刷新运行时缓存
         self._refresh_cache()
+        self._checkpoint()  # Plan 2: 每 500 轮断点序列化
 
     # ── 国债发行 + 购买（方向二核心）──────────────────────────
 
@@ -2678,6 +2727,9 @@ class EconomyModel(Model):
                 f"初始M0: {init:,.2f} | 当前M0: {round(total,2):,.2f}\n"
                 f"→ 有代码绕过了 Ledger 进行私人加/减钱！"
             )
+
+        # Plan 4: UI 只读快照
+        self.ui_snapshot = self._make_ui_snapshot()
 
     def adjust_interest_rate(self, delta: float) -> None:
         """Policy transmission: adjust all banks' loan rates"""
