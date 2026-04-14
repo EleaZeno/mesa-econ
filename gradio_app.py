@@ -319,6 +319,77 @@ def cb_submit_decision(action_type: str, firm_idx: int, qty: int,
         return f"✅ 决策已提交 [{action_type}]，将在下一帧结算"
 
 
+# ── 玩家企业回调 ─────────────────────────────────────────────────
+from model import PlayerFirm
+
+def cb_firm_status():
+    """返回玩家企业的实时状态面板"""
+    with _lock:
+        if _md is None:
+            return "**玩家企业：** 仿真未启动"
+        pf = next((f for f in _md.firms if isinstance(f, PlayerFirm)), None)
+        if pf is None:
+            return "**玩家企业：** 未找到玩家企业"
+        pending = getattr(_md, "_pending_firm", {})
+        waiting = "🟡 **等待决策**" if pending.get("_waiting") else "🟢 AI 自主"
+        return (
+            f"**玩家企业 #{pf.unique_id}** [{pf.industry.value}] {waiting}\n\n"
+            f"💰 现金：**{pf.cash:.1f}** &nbsp;|&nbsp; "
+            f"库存：**{pf.inventory:.1f}** &nbsp;|&nbsp; "
+            f"员工：**{pf.employees}**\n\n"
+            f"💵 时薪：**{pf.wage_offer:.1f}** &nbsp;|&nbsp; "
+            f"📦 商品价格：**{pf.price:.1f}** &nbsp;|&nbsp; "
+            f"📈 分红：**{pf.dividend_per_share:.2f}**/股\n\n"
+            f"🏦 贷款：**{pf.loan_principal:.1f}** &nbsp;|&nbsp; "
+            f"📍 城市：**{pf.city.value if hasattr(pf.city, 'value') else pf.city}**\n\n"
+            f"🔔 待处理：**{pending.get('available_workers', [])[:3]}**"
+        )
+
+
+def cb_firm_options():
+    """返回玩家企业的选项（招聘/开店）"""
+    with _lock:
+        if _md is None:
+            return [], [], [], [], "¥0"
+        pending = getattr(_md, "_pending_firm", {})
+        if not pending:
+            return [], [], [], [], "¥0"
+        workers = pending.get("available_workers", [])
+        unemployed = pending.get("unemployed_workers", [])
+        wage = pending.get("wage_offer", 0)
+        return (
+            [f"ID:{w['hh_id']} [技能{w['skill']}]" for w in workers],
+            [f"ID:{w['hh_id']} [技能{w['skill']}]" for w in unemployed],
+            list(range(0, 11)),  # 0-10 positions
+            list(range(5, 50, 5)),  # price 5-50
+            list(range(0, 21)),  # dividend 0-2.0
+            f"¥{wage:.0f}"
+        )
+
+
+def cb_firm_decision(action_type: str, hh_idx: int, positions: int, price: int, dividend: int):
+    """玩家企业提交决策 → 写入 _pending_firm['decision']"""
+    with _lock:
+        if _md is None:
+            return "❌ 模型未启动"
+        pending = getattr(_md, "_pending_firm", {})
+        decision = {"action": action_type}
+        if action_type == "hire" and hh_idx >= 0:
+            workers = pending.get("available_workers", [])
+            if hh_idx < len(workers):
+                decision["hh_id"] = workers[hh_idx]["hh_id"]
+        elif action_type == "set_wage" and wage > 0:
+            decision["wage"] = wage
+        elif action_type == "set_price" and price > 0:
+            decision["price"] = price
+        elif action_type == "set_dividend" and dividend > 0:
+            decision["dividend"] = dividend / 10.0
+        elif action_type == "open_position":
+            decision["positions"] = positions
+        _md._pending_firm["decision"] = decision
+        return f"✅ 企业决策已提交 [{action_type}]"
+
+
 
 
 
@@ -518,6 +589,9 @@ def build_ui() -> gr.Blocks:
         btn_toggle.click(fn=cb_toggle, outputs=[btn_toggle] + outputs)
         btn_reset.click(fn=cb_reset, outputs=[btn_toggle] + outputs)
         btn_apply.click(fn=cb_apply, inputs=all_sliders, outputs=outputs)
+
+        # 玩家企业操作（需要先读取选项）
+        # firm_status = gr.Markdown("*启动后显示企业状态*")
 
         # 冲击按钮
         for btn, shock in [

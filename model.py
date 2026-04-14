@@ -1930,6 +1930,106 @@ class Bank(Agent):
         self.deposit_rate = max(0.0, self.loan_rate - self.lending_spread)
 
 
+class PlayerFirm(Firm):
+    """
+    玩家控制的企业（v1.0）
+    
+    玩家可以完全控制：
+      - 定价：price_goods() 改为玩家设定
+      - 招聘：hire() 改为玩家审批
+      - 工资：update_wage() 改为玩家设定
+      - 分红：pay_dividend() 改为玩家设定
+    """
+
+    def step(self) -> None:
+        """跳过 AI，只打包可选操作"""
+        if self.check_bankruptcy():
+            return
+        # 玩家企业保留生产（这是收入来源）
+        self.buy_capital_goods()
+        self.produce()
+        # 其他交给玩家手动控制
+
+    def get_player_options(self) -> dict:
+        """打包玩家企业的可选操作"""
+        avail_hh = self.model._cache.get("employed_hh", [])
+        unemployed = [h for h in self.model.households if not h.employed and h.skill_level >= self._ind.get("skill_req", 0)]
+        workers = [h for h in avail_hh if h.skill_level >= self._ind.get("skill_req", 0)]
+
+        return {
+            "firm_id": self.unique_id,
+            "city": str(self.city.value if hasattr(self.city, "value") else self.city),
+            "industry": self.industry.value if hasattr(self.industry, "value") else str(self.industry),
+            "cash": round(self.cash, 2),
+            "inventory": round(self.inventory, 1),
+            "employees": self.employees,
+            "wage_offer": round(self.wage_offer, 1),
+            "price": round(self.price, 1),
+            "dividend_per_share": round(self.dividend_per_share, 2),
+            "open_positions": self.open_positions,
+            "loan_principal": round(self.loan_principal, 2),
+            # 求职者列表
+            "available_workers": [
+                {"hh_id": h.unique_id, "skill": h.skill_level, "city": str(h.city.value if hasattr(h.city, "value") else h.city)}
+                for h in workers[:8]
+            ],
+            "unemployed_workers": [
+                {"hh_id": h.unique_id, "skill": h.skill_level, "city": str(h.city.value if hasattr(h.city, "value") else h.city)}
+                for h in unemployed[:8]
+            ],
+        }
+
+    def apply_player_decision(self, decision: dict) -> None:
+        """执行玩家企业的决策"""
+        d = decision
+        if not d:
+            return
+
+        # ── 定价 ─────────────────────────────────────────
+        if d.get("action") == "set_price":
+            new_price = float(d.get("price", self.price))
+            if new_price > 0:
+                self.price = new_price
+
+        # ── 招聘/裁员 ───────────────────────────────────
+        elif d.get("action") == "hire":
+            hh_id = d.get("hh_id")
+            if hh_id:
+                hh = next((h for h in self.model.households if h.unique_id == hh_id), None)
+                if hh and not hh.employed and self.cash >= self.wage_offer:
+                    self.hire_specific(hh)
+
+        elif d.get("action") == "fire":
+            # 玩家可以选择解雇哪些员工（简化：随机解雇n个）
+            n = int(d.get("count", 1))
+            for _ in range(n):
+                if self.employees > 0:
+                    self.adjust_workforce(target_reduction=1)
+
+        # ── 调工资 ─────────────────���─────────────────────
+        elif d.get("action") == "set_wage":
+            new_wage = float(d.get("wage", self.wage_offer))
+            if new_wage > 0:
+                self.wage_offer = new_wage
+                self.update_wage()
+
+        # ── 分红 ───────────────────────────────────────
+        elif d.get("action") == "set_dividend":
+            new_div = float(d.get("dividend", 0))
+            self.dividend_per_share = max(0, new_div)
+            self.pay_dividend()
+
+        # ── 开职位 ───────────────────────────────────────
+        elif d.get("action") == "open_position":
+            self.open_positions = max(0, int(d.get("positions", 1)))
+
+        # ── 还贷 ───────────────────────────────────────
+        elif d.get("action") == "repay_loan":
+            amount = float(d.get("amount", self.loan_principal))
+            if amount > 0 and self.cash >= amount:
+                self.repay_loan(amount)
+
+
 class Trader(Agent):
     """
     交易员 v3.0 - 四种策略
@@ -2325,7 +2425,13 @@ class EconomyModel(Model):
             self.agents.add(h)
             self.households.append(h)
 
-        for _ in range(n_firm):
+        # ── 玩家企业（第一个 Firm 是玩家控制的）────────────────
+        self._pending_firm: dict = {}
+        owner_firm = PlayerFirm(self)
+        self.agents.add(owner_firm)
+        self.firms.append(owner_firm)
+
+        for _ in range(n_firm - 1):
             f = Firm(self)
             # 初始员工分配（打破 employees=0 的死循环）
             n_init = self.random.randint(3, 6)
@@ -2484,7 +2590,17 @@ class EconomyModel(Model):
         # 4. 企业：生产 → 卖货 → 产生活动 → 发工资（可能产生贷款申请）
         self._pending_loan_requests.clear()
         for firm in self.firms[:]:
-            firm.step()
+            if isinstance(firm, PlayerFirm):
+                # 写入玩家企业的可选操作
+                firm.model._pending_firm = firm.get_player_options()
+            else:
+                firm.step()
+        # 执行玩家企业决策（来自上一帧的 UI 提交）
+        if self._pending_firm.get("decision"):
+            firm = next((f for f in self.firms if isinstance(f, PlayerFirm)), None)
+            if firm:
+                firm.apply_player_decision(self._pending_firm["decision"])
+            self._pending_firm = {}
 
         # 5. 银行处理企业贷款申请（运营贷）
         for bank in self.banks:
