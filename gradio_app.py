@@ -1,8 +1,7 @@
 """
-经济沙盘 v4.4 — Gradio 版 (SFC 审计)
-所有价格信号（工资/利率/商品价格）Agent 自主博弈涌现，无全局硬编码。
-修复：线程锁 RLock、M0 资金守恒、迁移/求职成本闭环
-
+经济沙盘 v4.6 — Gradio 版 (SFC 审计 + Layer 2/3 稳定器)
+Layer 2: 扩招逻辑修复（不依赖 production 初始值）
+Layer 3: 默认失业保险(5) + 政府购买(50)，防止需求塌缩
 Run: python gradio_app.py
 """
 
@@ -45,7 +44,7 @@ def _init(**kw):
     d = dict(
         n_households=25, n_firms=12, n_traders=20,
         tax_rate=0.15,
-        productivity=1.0, subsidy=0.0, gov_purchase=0.0,
+        productivity=1.0, subsidy=5.0, gov_purchase=50.0,
         capital_gains_tax=0.10, shock_prob=0.02,
     )
     d.update((k, v) for k, v in kw.items() if v is not None)
@@ -193,7 +192,7 @@ def _snapshot():
         score = last.get("score", 50)
         score_color = "#16a34a" if score >= 80 else "#f59e0b" if score >= 40 else "#ef4444"
         stats_md = (
-            f"## 经济沙盘 v4.0 &nbsp;&nbsp;"
+            f"## 经济沙盘 v4.6 &nbsp;&nbsp;"
             f"<span style='color:{score_color};font-size:28px;font-weight:800'>{score}</span>"
             f"<span style='color:#94a3b8;font-size:12px'> 健康分</span>\n\n"
             f"**第 {last['cycle']} 轮** &nbsp;|&nbsp; "
@@ -206,7 +205,7 @@ def _snapshot():
             f"🌆 B城 {last['cb_pop']}人 GDP={last['cb_gdp']:,} 失业{last['cb_unemp']:.1f}%"
         )
     else:
-        stats_md = "## 经济沙盘 v4.0\n\n*仿真未开始，点击「单步」或「开始」*"
+        stats_md = "## 经济沙盘 v4.6\n\n*仿真未开始，点击「单步」或「开始」*"
 
     macro_fig = _make_fig(hist)
     city_fig = _make_city_fig(hist)
@@ -301,8 +300,8 @@ def build_ui() -> gr.Blocks:
 
                 sl_tax = gr.Slider(5, 30, value=15, step=1, label="税率 (%)")
                 sl_prod = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="生产率")
-                sl_gov = gr.Slider(0, 500, value=0, step=10, label="政府购买")
-                sl_sub = gr.Slider(0, 100, value=0, step=5, label="补贴")
+                sl_gov = gr.Slider(0, 500, value=50, step=10, label="政府购买")
+                sl_sub = gr.Slider(0, 100, value=5, step=5, label="补贴")
                 sl_cg = gr.Slider(0, 50, value=10, step=5, label="资本利得税率 (%)")
 
                 gr.Markdown("#### 城市政策")

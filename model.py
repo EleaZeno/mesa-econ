@@ -1,6 +1,6 @@
 from __future__ import annotations
 """
-Mesa 经济沙盘 - 核心模型 v4.4 (SFC 审计版)
+Mesa 经济沙盘 - 核心模型 v4.6 (Layer 2/3 稳定器版)
 基于 FRB/US · NAWM · ABCE 框架设计思路
 
 v4.0 三大战役：
@@ -192,8 +192,8 @@ DEFAULTS = dict(
        # 基准利率
     # min_wage 已废除v4.0
     productivity=1.0,           # 全要素生产率（TFP）
-    subsidy=0.0,                # 失业补贴
-    gov_purchase=0.0,          # 政府购买（新增）
+    subsidy=5.0,                # 失业补贴（自动稳定器，防止需求塌缩）
+    gov_purchase=50.0,         # 政府购买（自动稳定器，拉动基础需求）
     qe_amount=0.0,              # 量化宽松规模（新增）
     # ── 劳动力市场 ────────────────────────────────────
     job_search_cost=1.0,        # 求职现金消耗（摩擦成本）
@@ -1090,38 +1090,38 @@ class Firm(Agent):
 
     def adjust_workforce(self) -> None:
         """生命周期 + 经济状态决定裁员/扩产：
-        - 库存积压（inventory > production * 0.8）→ 裁员
-        - 库存不足（inventory < production * 0.3）且现金充足 → 扩招
+        - 库存积压 → 裁员（与绝对库存挂钩，不依赖 production 初始值）
+        - 库存不足 + 现金充足 → 扩招
         """
+        # ── 扩招逻辑（库存低 + 现金充足，任何时候可触发）────
+        # 扩招不看 production（初始 production=0 会导致永远不扩招）
+        if self.employees > 0 and self.inventory < max(1.0, self.production) * 0.5 \
+                and self.cash > self.wage_offer * 3:
+            self.open_positions += 1
+
+        # ── 裁员逻辑 ────────────────────────────────────────
         if self.employees == 0:
             return
+        employed = self.model._cache.get('employees_of', {}).get(self.unique_id, [])
+        if not employed:
+            return
 
-        # ── 裁员逻辑（库存严重积压才裁）───────────────────────
-        layoff_prob = self._ind["layoff_prob"]
-        if self.lifecycle == FirmLifecycle.DECLINE:
-            layoff_prob *= 2.0
-        # 修复：需要显著积压（inventory > production * 3）才裁员
-        # 否则每步都触发（production 初始为 0，inventory > 0 故永远满足）
-        if self.production > 1 and self.inventory > self.production * 3.0:
-            layoff_prob *= 3.0
-
-        if self.random.random() < layoff_prob:
-            employed = self.model._cache.get('employees_of', {}).get(self.unique_id, [])
-            if not employed:
-                return
-            # 修复：n_layoff 与实际辞退人数匹配
-            n_layoff = min(len(employed), self.random.randint(1, 3))
-            to_layoff = self.random.sample(employed, n_layoff)
-            for h in to_layoff:
-                h.employed = False
-                h.employer = None
-                h.salary = 0.0
-            self.employees -= n_layoff
-
-        # ── 扩招逻辑（库存低 + 现金充足）────────────────────
-        if (self.production > 0 and self.inventory < self.production * 0.3
-                and self.cash > self.wage_offer * 2):
-            self.open_positions += 1
+        # 用绝对库存判断（不受 production 初始值影响）
+        # 库存 > 3 * (employees * base_productivity) 才触发裁员
+        base_prod_per_worker = 1.5  # 每员工基准产出
+        max_comfortable = self.employees * base_prod_per_worker
+        if self.inventory > max_comfortable * 3.0:
+            layoff_prob = self._ind["layoff_prob"]
+            if self.lifecycle == FirmLifecycle.DECLINE:
+                layoff_prob *= 2.0
+            if self.random.random() < layoff_prob:
+                n_layoff = min(len(employed), self.random.randint(1, 2))
+                to_layoff = self.random.sample(list(employed), n_layoff)
+                for h in to_layoff:
+                    h.employed = False
+                    h.employer = None
+                    h.salary = 0.0
+                self.employees -= n_layoff
 
     def apply_for_loan(self) -> None:
         """申请贷款（有信用审核）—— 通过 Ledger"""
