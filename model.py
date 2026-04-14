@@ -831,6 +831,15 @@ class Household(Agent):
             "job_options": job_options,
             "goods_options": goods_options,
             "bank_options": bank_options,
+            # ── 权限阶梯 ────────────────────────────────────
+            "player_role": check_player_role(
+                self,
+                next((f for f in self.model.firms if isinstance(f, PlayerFirm)), None)
+            ).value,
+            "role_name": check_player_role(
+                self,
+                next((f for f in self.model.firms if isinstance(f, PlayerFirm)), None)
+            ).name,
         }
 
     def apply_player_decision(self, decision: dict) -> None:
@@ -910,6 +919,39 @@ class Household(Agent):
                     self.model._collect_tax(tax)
                 self.model.sell_orders += shares
                 self.shares_owned -= shares
+
+        # ── 市长操作（需 PlayerRole >= MAYOR）────────────────
+        elif d.get("action") == "set_city_tax":
+            role = check_player_role(self, next((f for f in self.model.firms if isinstance(f, PlayerFirm)), None))
+            if role >= PlayerRole.MAYOR:
+                city_name = d.get("city", "city_a")
+                rate = float(d.get("rate", 0.15))
+                city_key = City.CITY_A if city_name == "city_a" else City.CITY_B
+                CITY_PARAMS[city_key]["corporate_tax_rate"] = max(0.05, min(0.40, rate))
+                self.model.adjust_tax_rate(0)  # 刷新缓存
+
+        elif d.get("action") == "set_city_subsidy":
+            role = check_player_role(self, next((f for f in self.model.firms if isinstance(f, PlayerFirm)), None))
+            if role >= PlayerRole.MAYOR:
+                city_name = d.get("city", "city_a")
+                amount = float(d.get("amount", 10))
+                city_key = City.CITY_A if city_name == "city_a" else City.CITY_B
+                CITY_PARAMS[city_key]["subsidy"] = max(0, min(100, amount))
+
+        # ── 美联储操作（需 PlayerRole >= FED_CHAIR）────────────
+        elif d.get("action") == "set_interest_rate":
+            role = check_player_role(self, next((f for f in self.model.firms if isinstance(f, PlayerFirm)), None))
+            if role >= PlayerRole.FED_CHAIR:
+                spread_delta = float(d.get("delta", 0))
+                for bank in self.model._active_banks():
+                    bank.lending_spread = max(0.005, min(0.10, bank.lending_spread + spread_delta))
+
+        elif d.get("action") == "quantitative_easing":
+            role = check_player_role(self, next((f for f in self.model.firms if isinstance(f, PlayerFirm)), None))
+            if role >= PlayerRole.FED_CHAIR:
+                amount = float(d.get("amount", 100))
+                self.model.government.total_printed_money += amount
+                self.model.ledger.transfer(self.model._market_pool, self.model.government, amount)
 
     def update_wealth(self) -> None:
         """财富 = 现金 - 负债 + 股票市值"""
@@ -1029,6 +1071,37 @@ class Household(Agent):
         self.update_wealth()
         self._consider_migration()
         self.consider_entrepreneurship()
+
+
+# ══════════════════════════════════════════════════════════════
+# 玩家权限阶梯（Privilege Ladder）
+# ══════════════════════════════════════════════════════════════
+from enum import IntEnum
+
+class PlayerRole(IntEnum):
+    """玩家角色等级（解锁递进）"""
+    CITIZEN       = 1   # 打工人：消费/股票/跳槽
+    ENTREPRENEUR  = 2   # 资本家：+控制企业
+    MAYOR         = 3   # 市长：+城市政策（税率/补贴/最低工资）
+    FED_CHAIR     = 4   # 美联储主席：+全局利率/QE印钞
+
+# ── 解锁门槛 ────────────────────────────────────────────────
+ROLE_THRESHOLDS = {
+    PlayerRole.CITIZEN:      {"wealth": 0,      "firm_size": 0},
+    PlayerRole.ENTREPRENEUR: {"wealth": 200,    "firm_size": 0},
+    PlayerRole.MAYOR:        {"wealth": 1000,   "firm_size": 5},
+    PlayerRole.FED_CHAIR:    {"wealth": 5000,   "firm_size": 10},
+}
+
+def check_player_role(player_hh, player_firm=None) -> PlayerRole:
+    """根据玩家当前财富/企业规模返回最高解锁角色"""
+    wealth = player_hh.wealth if player_hh else 0
+    firm_size = player_firm.employees if player_firm else 0
+    role = PlayerRole.CITIZEN
+    for r, thresh in ROLE_THRESHOLDS.items():
+        if wealth >= thresh["wealth"] and firm_size >= thresh["firm_size"]:
+            role = max(role, r)
+    return role
 
 
 class PlayerHousehold(Household):

@@ -392,6 +392,75 @@ def cb_firm_decision(action_type: str, hh_idx: int, positions: int, price: float
         return f"✅ 企业决策已提交 [{action_type}]"
 
 
+# ── 市长/美联储回调 ──────────────────────────────────────────────
+from model import check_player_role, PlayerRole
+
+def cb_mayor_fed_status():
+    """返回市长/美联储面板状态"""
+    with _lock:
+        if _md is None:
+            return "*仿真未启动*", "*仿真未启动*"
+        ph = next((h for h in _md.households if isinstance(h, PlayerHousehold)), None)
+        pf = next((f for f in _md.firms if isinstance(f, PlayerFirm)), None)
+        role = check_player_role(ph, pf) if ph else PlayerRole.CITIZEN
+        wealth = ph.wealth if ph else 0
+        firm_size = pf.employees if pf else 0
+
+        mayor_icon = "🔓" if role >= PlayerRole.MAYOR else "🔒"
+        fed_icon = "🔓" if role >= PlayerRole.FED_CHAIR else "🔒"
+
+        mayor_md = (
+            f"{mayor_icon} **市长权限** &nbsp;|&nbsp; "
+            f"财富: {wealth:.0f}/1000 &nbsp;|&nbsp; 员工: {firm_size}/5\n\n"
+            + ("✅ **已解锁** — 可调整城市税率和补贴" if role >= PlayerRole.MAYOR
+               else "❌ 需要财富≥1000 且 企业员工≥5")
+        )
+        fed_md = (
+            f"{fed_icon} **美联储权限** &nbsp;|&nbsp; "
+            f"财富: {wealth:.0f}/5000 &nbsp;|&nbsp; 员工: {firm_size}/10\n\n"
+            + ("✅ **已解锁** — 可调整利率和执行QE" if role >= PlayerRole.FED_CHAIR
+               else "❌ 需要财富≥5000 且 企业员工≥10")
+        )
+        return mayor_md, fed_md
+
+
+def cb_mayor_decision(action_type: str, city: str, value: float):
+    """市长决策：城市税率/补贴"""
+    with _lock:
+        if _md is None:
+            return "❌ 模型未启动"
+        ph = next((h for h in _md.households if isinstance(h, PlayerHousehold)), None)
+        pf = next((f for f in _md.firms if isinstance(f, PlayerFirm)), None)
+        role = check_player_role(ph, pf) if ph else PlayerRole.CITIZEN
+        if role < PlayerRole.MAYOR:
+            return "🔒 权限不足（需市长等级）"
+        _md._pending_player["decision"] = {
+            "action": action_type,
+            "city": city,
+            "rate": value / 100 if "tax" in action_type else 0,
+            "amount": value if "subsidy" in action_type else 0,
+        }
+        return f"✅ 市长令已下达 [{action_type}]"
+
+
+def cb_fed_decision(action_type: str, delta: float = 0, amount: float = 0):
+    """美联储决策：利率/QE"""
+    with _lock:
+        if _md is None:
+            return "❌ 模型未启动"
+        ph = next((h for h in _md.households if isinstance(h, PlayerHousehold)), None)
+        pf = next((f for f in _md.firms if isinstance(f, PlayerFirm)), None)
+        role = check_player_role(ph, pf) if ph else PlayerRole.CITIZEN
+        if role < PlayerRole.FED_CHAIR:
+            return "🔒 权限不足（需美联储主席等级）"
+        _md._pending_player["decision"] = {
+            "action": action_type,
+            "delta": delta,
+            "amount": amount,
+        }
+        return f"✅ 美联储决议已通过 [{action_type}]"
+
+
 
 
 
@@ -547,6 +616,33 @@ def build_ui() -> gr.Blocks:
 
                 firm_feedback = gr.Textbox(label="企业反馈", interactive=False, lines=2)
 
+                # ── 市长面板（需 ENTREPRENEUR+）────────────────────
+                gr.Markdown("### 🏛️ 市长控制")
+                mayor_status_md = gr.Markdown("*财富≥1000 & 员工≥5 解锁*")
+
+                with gr.Row():
+                    sl_city_tax_a = gr.Number(value=12, min=5, max=40, step=1, label="A城税率%", scale=1)
+                    sl_city_tax_b = gr.Number(value=18, min=5, max=40, step=1, label="B城税率%", scale=1)
+                with gr.Row():
+                    sl_city_sub_a = gr.Number(value=10, min=0, max=100, step=5, label="A城补贴", scale=1)
+                    sl_city_sub_b = gr.Number(value=5, min=0, max=100, step=5, label="B城补贴", scale=1)
+                with gr.Row():
+                    btn_city_tax = gr.Button("🏛️ 设税率", scale=1)
+                    btn_city_sub = gr.Button("🏛️ 设补贴", scale=1)
+
+                # ── 美联储面板（需 MAYOR+）────────────────────────
+                gr.Markdown("### 🏦 美联储控制")
+                fed_status_md = gr.Markdown("*财富≥5000 & 员工≥10 解锁*")
+
+                with gr.Row():
+                    sl_rate_delta = gr.Number(value=0.01, min=-0.05, max=0.05, step=0.005, label="利率调整", scale=1)
+                    sl_qe = gr.Number(value=100, min=0, max=1000, step=50, label="QE金额", scale=1)
+                with gr.Row():
+                    btn_rate = gr.Button("🏦 调利率", scale=1)
+                    btn_qe = gr.Button("🏦 量化宽松", scale=1)
+
+                mayor_fed_feedback = gr.Textbox(label="政策反馈", interactive=False, lines=2)
+
             # ── 右侧：图表面板 ──────────────────────────────────
             with gr.Column(scale=3):
                 gr.Markdown("### 宏观经济指标")
@@ -631,6 +727,33 @@ def build_ui() -> gr.Blocks:
             fn=lambda d, **kw: cb_firm_decision("set_dividend", -1, 0, 0, float(d or 0) * 10),
             inputs=[sl_dividend],
             outputs=[firm_feedback],
+        )
+
+        # 市长/美联储轮询
+        timer.tick(fn=cb_mayor_fed_status, outputs=[mayor_status_md, fed_status_md])
+
+        # 市长操作
+        btn_city_tax.click(
+            fn=lambda a, b, **kw: cb_mayor_decision("set_city_tax", "city_a", float(a or 12)),
+            inputs=[sl_city_tax_a, sl_city_tax_b],
+            outputs=[mayor_fed_feedback],
+        )
+        btn_city_sub.click(
+            fn=lambda a, b, **kw: cb_mayor_decision("set_city_subsidy", "city_a", float(a or 10)),
+            inputs=[sl_city_sub_a, sl_city_sub_b],
+            outputs=[mayor_fed_feedback],
+        )
+
+        # 美联储操作
+        btn_rate.click(
+            fn=lambda d, **kw: cb_fed_decision("set_interest_rate", float(d or 0.01), 0),
+            inputs=[sl_rate_delta],
+            outputs=[mayor_fed_feedback],
+        )
+        btn_qe.click(
+            fn=lambda q, **kw: cb_fed_decision("quantitative_easing", 0, float(q or 100)),
+            inputs=[sl_qe],
+            outputs=[mayor_fed_feedback],
         )
 
         # 冲击按钮
