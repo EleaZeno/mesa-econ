@@ -12,3 +12,9 @@ env/
 *.db
 
 .DS_Store
+
+# Test artifacts
+.pytest_cache/
+
+# Gradio artifacts
+.gradio/
