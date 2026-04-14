@@ -1,5 +1,5 @@
 """
-经济沙盘 v5.0 — Gradio 版 (四方向全部完成)
+经济沙盘 v5.2 — Gradio 版 (四方向全部完成)
 方向一: 拉式信贷/资产负债表衰退 | 方向二: 国债市场/收益率曲线/CRT
 方向三: B2B供应链/牛鞭效应 | 方向四: 空间经济学/地租
 Run: python gradio_app.py
@@ -192,7 +192,7 @@ def _snapshot():
         score = last.get("score", 50)
         score_color = "#16a34a" if score >= 80 else "#f59e0b" if score >= 40 else "#ef4444"
         stats_md = (
-            f"## 经济沙盘 v5.0 &nbsp;&nbsp;"
+            f"## 经济沙盘 v5.2 &nbsp;&nbsp;"
             f"<span style='color:{score_color};font-size:28px;font-weight:800'>{score}</span>"
             f"<span style='color:#94a3b8;font-size:12px'> 健康分</span>\n\n"
             f"**第 {last['cycle']} 轮** &nbsp;|&nbsp; "
@@ -205,7 +205,7 @@ def _snapshot():
             f"🌆 B城 {last['cb_pop']}人 GDP={last['cb_gdp']:,} 失业{last['cb_unemp']:.1f}%"
         )
     else:
-        stats_md = "## 经济沙盘 v5.0\n\n*仿真未开始，点击「单步」或「开始」*"
+        stats_md = "## 经济沙盘 v5.2\n\n*仿真未开始，点击「单步」或「开始」*"
 
     macro_fig = _make_fig(hist)
     city_fig = _make_city_fig(hist)
