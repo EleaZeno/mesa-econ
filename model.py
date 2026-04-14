@@ -1991,27 +1991,40 @@ class PlayerFirm(Firm):
             if new_price > 0:
                 self.price = new_price
 
-        # ── 招聘/裁员 ───────────────────────────────────
+        # ── 招聘 ───────────────────────────────────────
         elif d.get("action") == "hire":
             hh_id = d.get("hh_id")
             if hh_id:
                 hh = next((h for h in self.model.households if h.unique_id == hh_id), None)
                 if hh and not hh.employed and self.cash >= self.wage_offer:
-                    self.hire_specific(hh)
+                    # 直接雇佣指定居民
+                    hh.employed = True
+                    hh.employer = self
+                    hh.salary = self.wage_offer
+                    self.employees += 1
+                    self.open_positions = max(0, self.open_positions - 1)
+            else:
+                # 没指定 HH ID → 调用基类随机招聘
+                self.open_positions = max(1, self.open_positions)
+                self.hire()
 
         elif d.get("action") == "fire":
-            # 玩家可以选择解雇哪些员工（简化：随机解雇n个）
+            # 裁员：从当前员工中解雇 n 人
             n = int(d.get("count", 1))
-            for _ in range(n):
-                if self.employees > 0:
-                    self.adjust_workforce(target_reduction=1)
+            fired = 0
+            for h in list(self.model.households):
+                if h.employer is self and fired < n:
+                    h.employed = False
+                    h.employer = None
+                    h.salary = 0.0
+                    self.employees -= 1
+                    fired += 1
 
-        # ── 调工资 ─────────────────���─────────────────────
+        # ── 调工资 ───────────────────────────────────────
         elif d.get("action") == "set_wage":
             new_wage = float(d.get("wage", self.wage_offer))
             if new_wage > 0:
                 self.wage_offer = new_wage
-                self.update_wage()
 
         # ── 分红 ───────────────────────────────────────
         elif d.get("action") == "set_dividend":
@@ -2025,9 +2038,11 @@ class PlayerFirm(Firm):
 
         # ── 还贷 ───────────────────────────────────────
         elif d.get("action") == "repay_loan":
-            amount = float(d.get("amount", self.loan_principal))
-            if amount > 0 and self.cash >= amount:
-                self.repay_loan(amount)
+            amount = min(float(d.get("amount", self.loan_principal)), self.cash, self.loan_principal)
+            if amount > 0 and self.cash >= amount and self.model.banks:
+                bank = self.random.choice(self.model._active_banks())
+                if self.model.ledger.transfer(self, bank, amount):
+                    self.loan_principal = max(0.0, self.loan_principal - amount)
 
 
 class Trader(Agent):
@@ -2430,6 +2445,19 @@ class EconomyModel(Model):
         owner_firm = PlayerFirm(self)
         self.agents.add(owner_firm)
         self.firms.append(owner_firm)
+        # 给玩家企业分配初始员工（否则无法生产）
+        candidates = list(self.households)
+        n_init_pf = self.random.randint(3, 5)
+        for _ in range(n_init_pf):
+            if not candidates:
+                break
+            h = self.random.choice(candidates)
+            candidates.remove(h)
+            h.employed = True
+            h.employer = owner_firm
+            h.salary = owner_firm.wage_offer
+            owner_firm.employees += 1
+            owner_firm.open_positions = 0
 
         for _ in range(n_firm - 1):
             f = Firm(self)

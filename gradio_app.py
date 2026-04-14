@@ -367,25 +367,27 @@ def cb_firm_options():
         )
 
 
-def cb_firm_decision(action_type: str, hh_idx: int, positions: int, price: int, dividend: int):
-    """玩家企业提交决策 → 写入 _pending_firm['decision']"""
+def cb_firm_decision(action_type: str, hh_idx: int, positions: int, price: float, dividend: float):
+    """玩家企业提交决策"""
     with _lock:
         if _md is None:
             return "❌ 模型未启动"
-        pending = getattr(_md, "_pending_firm", {})
         decision = {"action": action_type}
         if action_type == "hire" and hh_idx >= 0:
+            pending = getattr(_md, "_pending_firm", {})
             workers = pending.get("available_workers", [])
             if hh_idx < len(workers):
                 decision["hh_id"] = workers[hh_idx]["hh_id"]
-        elif action_type == "set_wage" and wage > 0:
-            decision["wage"] = wage
-        elif action_type == "set_price" and price > 0:
-            decision["price"] = price
-        elif action_type == "set_dividend" and dividend > 0:
-            decision["dividend"] = dividend / 10.0
+        elif action_type == "set_wage":
+            decision["wage"] = max(1.0, float(price or 8))
+        elif action_type == "set_price":
+            decision["price"] = max(1.0, float(price or 10))
+        elif action_type == "set_dividend":
+            decision["dividend"] = max(0.0, float(dividend or 0) / 10.0)
         elif action_type == "open_position":
-            decision["positions"] = positions
+            decision["positions"] = max(0, int(positions or 2))
+        elif action_type == "fire":
+            decision["count"] = max(1, int(positions or 1))
         _md._pending_firm["decision"] = decision
         return f"✅ 企业决策已提交 [{action_type}]"
 
@@ -520,6 +522,31 @@ def build_ui() -> gr.Blocks:
 
                 player_feedback = gr.Textbox(label="操作反馈", interactive=False, lines=2)
 
+                # ── 玩家企业面板 ────────────────────────────────────
+                gr.Markdown("### 🏭 玩家企业")
+                firm_status_md = gr.Markdown("*启动后显示企业状态*")
+
+                with gr.Row():
+                    sl_price = gr.Number(value=10, min=1, max=100, step=1, label="商品定价", scale=1)
+                    sl_wage = gr.Number(value=8, min=1, max=50, step=0.5, label="工资标准", scale=1)
+                with gr.Row():
+                    btn_set_price = gr.Button("💰 调价", scale=1)
+                    btn_set_wage = gr.Button("💵 调薪", scale=1)
+
+                with gr.Row():
+                    sl_positions = gr.Number(value=2, min=0, max=20, step=1, label="招聘名额", scale=1)
+                    sl_fire = gr.Number(value=0, min=0, max=10, step=1, label="裁员人数", scale=1)
+                with gr.Row():
+                    btn_hire = gr.Button("➕ 招人", scale=1)
+                    btn_fire = gr.Button("➖ 裁员", scale=1)
+                    btn_open_pos = gr.Button("📋 开职位", scale=1)
+
+                with gr.Row():
+                    sl_dividend = gr.Number(value=0, min=0, max=5, step=0.1, label="每股分红", scale=1)
+                btn_dividend = gr.Button("📊 设分红", scale=1)
+
+                firm_feedback = gr.Textbox(label="企业反馈", interactive=False, lines=2)
+
             # ── 右侧：图表面板 ──────────────────────────────────
             with gr.Column(scale=3):
                 gr.Markdown("### 宏观经济指标")
@@ -539,6 +566,7 @@ def build_ui() -> gr.Blocks:
         # 玩家面板轮询（定时刷新状态和选项）
         timer.tick(fn=cb_player_status, outputs=[player_status_md])
         timer.tick(fn=cb_player_options, outputs=[sel_goods, sel_job])
+        timer.tick(fn=cb_firm_status, outputs=[firm_status_md])
 
         # 控制按钮
         btn_step.click(fn=cb_step, outputs=outputs)
@@ -546,7 +574,7 @@ def build_ui() -> gr.Blocks:
         btn_reset.click(fn=cb_reset, outputs=[btn_toggle] + outputs)
         btn_apply.click(fn=cb_apply, inputs=all_sliders, outputs=outputs)
 
-        # 玩家操作
+        # 玩家居民操作
         btn_consume.click(
             fn=lambda idx, qty, **kw: cb_submit_decision("consume", int(idx or 0), int(qty or 1), 0, 0),
             inputs=[sel_goods, sl_qty],
@@ -573,25 +601,37 @@ def build_ui() -> gr.Blocks:
             outputs=[player_feedback],
         )
 
-        # 冲击按钮
-        for btn, shock in [
-            (btn_oil, "oil_crisis"),
-            (btn_tech, "tech_breakthrough"),
-            (btn_demand, "demand_slowdown"),
-            (btn_trade, "trade_war"),
-            (btn_bank, "banking_panic"),
-            (btn_recovery, "recovery"),
-        ]:
-            btn.click(fn=lambda s=shock: cb_shock(s), outputs=outputs)
-
-        # 控制按钮
-        btn_step.click(fn=cb_step, outputs=outputs)
-        btn_toggle.click(fn=cb_toggle, outputs=[btn_toggle] + outputs)
-        btn_reset.click(fn=cb_reset, outputs=[btn_toggle] + outputs)
-        btn_apply.click(fn=cb_apply, inputs=all_sliders, outputs=outputs)
-
-        # 玩家企业操作（需要先读取选项）
-        # firm_status = gr.Markdown("*启动后显示企业状态*")
+        # 玩家企业操作
+        btn_set_price.click(
+            fn=lambda p, **kw: cb_firm_decision("set_price", -1, 0, float(p or 10), 0),
+            inputs=[sl_price],
+            outputs=[firm_feedback],
+        )
+        btn_set_wage.click(
+            fn=lambda w, **kw: cb_firm_decision("set_wage", -1, 0, float(w or 8), 0),
+            inputs=[sl_wage],
+            outputs=[firm_feedback],
+        )
+        btn_hire.click(
+            fn=lambda **kw: cb_firm_decision("hire", 0, 0, 0, 0),
+            inputs=[],
+            outputs=[firm_feedback],
+        )
+        btn_fire.click(
+            fn=lambda n, **kw: cb_firm_decision("fire", -1, int(n or 1), 0, 0),
+            inputs=[sl_fire],
+            outputs=[firm_feedback],
+        )
+        btn_open_pos.click(
+            fn=lambda p, **kw: cb_firm_decision("open_position", -1, int(p or 2), 0, 0),
+            inputs=[sl_positions],
+            outputs=[firm_feedback],
+        )
+        btn_dividend.click(
+            fn=lambda d, **kw: cb_firm_decision("set_dividend", -1, 0, 0, float(d or 0) * 10),
+            inputs=[sl_dividend],
+            outputs=[firm_feedback],
+        )
 
         # 冲击按钮
         for btn, shock in [
