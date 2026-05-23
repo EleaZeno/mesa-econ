@@ -55,6 +55,193 @@ class City(Enum):
     CITY_B = "city_b"   # 城市 B（科技导向）
 
 
+# ══════════════════════════════════════════════════════════════
+# 房地产系统（Real Estate & Mortgages）
+# ══════════════════════════════════════════════════════════════
+
+class Land:
+    """
+    房产单位（稀缺、可交易）
+
+    机制：
+      - 供给固定（总量 = n_households / 2），不新增
+      - 价格由需求压力决定：想买的人越多、收入越高 → 房价越贵
+      - Household 可以购买（现金）或申请抵押贷款
+      - 抵押贷款违约 → 银行没收房产 → 拍卖（MarketPool）→ 冲击房价
+
+    涌现效果：
+      经济好 → 买房需求 ↑ → 房价 ↑ → 抵押品升值 → 银行敢贷更多 → 经济更好（正反馈）
+      利率↑ → 月供↑ → 断供↑ → 银行收房拍卖 → 房价↓ → 抵押品贬值 → 信贷紧缩 → 经济衰退
+    """
+
+    _registry: list["Land"] = []
+
+    def __init__(self, city: City, quality: int = 1):
+        """
+        quality: 1=普通 / 2=优质 / 3=豪宅
+        初始价格 = quality × BASE_PRICE
+        """
+        self.unique_id = f"land_{len(Land._registry)}"
+        self.city = city
+        self.quality = quality  # 1/2/3
+        # 初始价格锚（此后由 Market 动态定价）
+        self.price: float = DEFAULTS["land_base_price"] * quality
+        # 房主（None = 待售）
+        self.owner: Optional["Household"] = None
+        # 抵押贷款状态
+        self.mortgage_principal: float = 0.0     # 未偿本金
+        self.mortgage_rate: float = 0.06          # 年化利率（6%）
+        self.mortgage_term: int = 30             # 贷款期限（轮）
+        self.mortgage_payments_made: int = 0    # 已还款轮数
+        # 违约标记
+        self.foreclosed: bool = False
+        Land._registry.append(self)
+
+    @property
+    def monthly_payment(self) -> float:
+        """等额本息月供（简化版，不考虑利息资本化）"""
+        if self.mortgage_principal <= 0:
+            return 0.0
+        # 年化 → 每轮：principal × rate / 12
+        return self.mortgage_principal * (self.mortgage_rate / 12)
+
+    @property
+    def equity(self) -> float:
+        """房主权益 = 房价 − 未偿本金"""
+        return self.price - self.mortgage_principal
+
+    def make_payment(self) -> bool:
+        """支付月供：成功返回 True，违约返回 False"""
+        if self.mortgage_principal <= 0 or self.owner is None:
+            return True
+        payment = self.monthly_payment
+        if self.owner.cash >= payment:
+            self.owner.cash -= payment
+            self.mortgage_principal = max(0.0, self.mortgage_principal - payment)
+            self.mortgage_payments_made += 1
+            return True
+        else:
+            # 违约：银行没收房产
+            self._foreclose()
+            return False
+
+    def _foreclose(self) -> None:
+        """没收房产：进入 MarketPool 拍卖"""
+        if self.owner is None:
+            return
+        # 银行坏账 + 房主失去房产
+        # （Bank.bad_debts 累加由 Bank.update_bad_debts() 处理）
+        self.foreclosed = True
+        self.owner = None
+        self.mortgage_principal = 0.0
+
+    @staticmethod
+    def update_market_price(model: "EconomyModel") -> None:
+        """
+        房价动态定价：
+          price_t = price_{t-1} × (1 + demand_pressure - supply_pressure)
+        需求压力 = 想买房的无房 HH 比例 × 平均收入增长率
+        供给压力 = 断供拍卖量 / 总供给
+        """
+        if not Land._registry:
+            return
+        total_land = len(Land._registry)
+        owned = sum(1 for l in Land._registry if l.owner is not None)
+        vacant = total_land - owned
+
+        # 需求压力：想买但没房的 HH 占比（排除已死亡）
+        can_buy = sum(
+            1 for hh in model.households
+            if not getattr(hh, "_dead", False)
+            and (hh.retired
+                 or getattr(hh, "land", None) is not None)
+        )
+        demand_ratio = 1.0 - (can_buy / max(1, len(model.households)))
+
+        # 供给压力：近期断供率
+        n_foreclosed = sum(1 for l in Land._registry if l.foreclosed)
+        supply_pressure = n_foreclosed / max(1, total_land) * 2
+
+        # 价格调整（均值回归 + 供需驱动）
+        base = DEFAULTS["land_base_price"]
+        for land in Land._registry:
+            if land.foreclosed:
+                land.foreclosed = False  # 重置，等拍卖后重新进入市场
+                continue
+            # 目标价 = 基本价 × 质量倍数 × (1 + 需求 - 供给)
+            target = base * land.quality * (1 + demand_ratio * 0.5 - supply_pressure * 0.3)
+            land.price += (target - land.price) * DEFAULTS["land_price_speed"]
+
+
+# ── 城市级参数（Phase 3：差异化政策）────────────────────────────
+
+
+# ══════════════════════════════════════════════════════════════
+# 大宗商品与外部世界（Commodities & Rest of World）
+# ══════════════════════════════════════════════════════════════
+
+class RestOfWorld:
+    """
+    外部世界（Rest of World）：全球市场，供应大宗商品
+
+    机制：
+      - 大宗商品价格由内部供给（国内产量）和外部冲击共同决定
+      - 制造业每轮按工艺消耗大宗商品（cost 输入）
+      - 外部冲击：OPEC 油价暴涨 → 制造业成本 ↑ → 物价 ↑ → 滞胀
+
+    涌现效果：
+      油价暴涨（1970s 滞胀、2022 能源危机）→ 制造业成本↑ → 物价↑
+      → 居民购买力↓ → 需求↓ → 企业裁员 → 失业↑ → 滞胀（Stagflation）
+    """
+
+    def __init__(self):
+        # 石油（美元/桶）—— 全球基准价格锚
+        self.oil_price: float = 50.0
+        self.base_oil_price: float = 50.0   # 长期均值锚
+        # 矿石（美元/吨）
+        self.ore_price: float = 100.0
+        self.base_ore_price: float = 100.0
+        # 供应冲击状态
+        self.supply_shock: float = 0.0     # 正=供给减少（涨价），负=供给过剩（跌价）
+        self.shock_duration: int = 0       # 冲击持续轮数
+
+    def apply_external_shock(self, shock_type: str) -> None:
+        """外部冲击传导到商品价格"""
+        if shock_type == "oil_crisis":
+            # OPEC 禁运式冲击：油价暴涨 3 倍
+            self.supply_shock = self.oil_price * 2.0
+            self.shock_duration = 5
+        elif shock_type == "commodity_glut":
+            # 供给过剩：矿石价格暴跌
+            self.ore_price = self.base_ore_price * 0.6
+            self.shock_duration = 3
+
+    def settle(self, model: "EconomyModel") -> None:
+        """每轮结算：商品价格均值回归 + 冲击消退"""
+        # 冲击消退
+        if self.shock_duration > 0:
+            self.shock_duration -= 1
+            if self.shock_duration == 0:
+                self.supply_shock *= 0.5  # 缓慢消退
+        else:
+            # 均值回归（油价）
+            self.oil_price += (self.base_oil_price - self.oil_price) * 0.02
+            self.ore_price += (self.base_ore_price - self.ore_price) * 0.02
+
+        # 制造业成本加成（油价冲击传导到制造业）
+        oil_delta = max(0.0, (self.oil_price - self.base_oil_price) / self.base_oil_price)
+        target_mult = 1.0 + oil_delta * 1.5  # 油价涨 100% → 成本乘数 ×2.5
+        for firm in model.firms:
+            if firm.industry == Industry.MANUFACTURING:
+                firm.oil_cost_multiplier += (target_mult - firm.oil_cost_multiplier) * 0.2
+
+    @property
+    def commodity_price_index(self) -> float:
+        """大宗商品价格指数（以基准为 100）"""
+        return ((self.oil_price / self.base_oil_price) +
+                (self.ore_price / self.base_ore_price)) / 2 * 100
+
+
 # ── 城市级参数（Phase 3：差异化政策）────────────────────────────
 CITY_PARAMS = {
     City.CITY_A: {
@@ -199,6 +386,7 @@ DEFAULTS = dict(
     # min_wage 已废除v4.0
     productivity=1.0,           # 全要素生产率（TFP）
     subsidy=10.0,               # 失业补贴（自动稳定器，防止需求塌缩）
+    pension=5.0,               # 养老金（退休居民每轮领取）
     gov_purchase=50.0,         # 政府购买（自动稳定器，拉动基础需求）
     qe_amount=0.0,              # 量化宽松规模（新增）
     # ── 劳动力市场 ────────────────────────────────────
@@ -215,6 +403,9 @@ DEFAULTS = dict(
     gordon_growth=0.02,         # 永续增长率（股价锚）
     price_stickiness=0.3,      # 价格粘性：30%企业每轮调价
     vol_window=10,             # 波动率滚动窗口
+    # ── 房地产 ─────────────────────────────────────
+    land_base_price=100.0,    # 房产基准价格（普通质量）
+    land_price_speed=0.05,    # 房价调整速度
     # ── 外部冲击 ──────────────────────────────────────
     shock_prob=0.02,            # 每轮外生冲击概率
     # ── 宏观锚点 ──────────────────────────────────────
@@ -356,7 +547,7 @@ from dataclasses import dataclass
 
 
 class BalanceSheet:
-    """通用资产负债表 — v5.2 dataclass（NaN/Inf 防护由 Ledger 保证）"""
+    """通用资产负债表 — v5.3 dataclass（NaN/Inf 防护由 Ledger 保证）"""
     cash: float = 0.0
     deposits: float = 0.0
     inventory: float = 0.0
@@ -513,7 +704,7 @@ class Household(Agent):
       → consume() → invest() → search_job()
     """
 
-    def __init__(self, model: EconomyModel):
+    def __init__(self, model: EconomyModel, initial_cash: float = None) -> None:
         super().__init__(model)
 
         # ── 城市归属（50/50 随机分配）───────────────
@@ -537,6 +728,8 @@ class Household(Agent):
         # 初始现金（帕累托分布偏向低现金）
         lo, hi = p["initial_cash_range"]
         self.cash = self.random.uniform(lo, hi)
+        if initial_cash is not None:
+            self.cash = initial_cash  # SFC: newborn baby cash must come from govt transfer
 
         # ── 状态变量 ───────────────────────────────
         self.goods: int = 0
@@ -546,6 +739,7 @@ class Household(Agent):
         self.loan_principal: float = 0.0
         self.shares_owned: int = 0
         self.cost_basis: float = 0.0   # 持股成本（移动平均买入价），用于计算资本利得
+        self.land: Optional["Land"] = None   # 房产（None = 无房）
         self.wealth: float = self.cash
         # 信用评分：初始基于技能水平（高技能→高信用）
         self.credit_score: float = 500 + self.skill_level * 100
@@ -556,6 +750,13 @@ class Household(Agent):
         self.utility_alpha: float = 0.4  # 商品消费权重（vs 储蓄）
         self.utility_rho: float = 0.5    # 替代弹性参数（0→柯布道格拉斯，1→完全替代）
         self.income_history: list[float] = []
+
+        # ── 人口生命周期 ────────────────────────────────
+        self.age: int = self.random.randint(20, 55)   # 初始年龄：20-55岁随机
+        self.retired: bool = False                     # 是否已退休
+        self.pension_received: float = 0.0             # 本轮领到的养老金
+        self.years_retired: int = 0                    # 退休年数（用于累计）
+        self._dead: bool = False                       # 标记死亡（EconomyModel 替换用）
 
     # ── 子行为 ─────────────────────────────────────────────
 
@@ -1025,7 +1226,37 @@ class Household(Agent):
     # ── 主循环 ─────────────────────────────────────────────
 
     def step(self) -> None:
+        # ── 人口生命周期 ───────────────────────────────
+        self.age += 1
+        self.years_retired = self.years_retired + 1 if self.retired else 0
+
+        # 60岁退休：停止提供劳动力，转领养老金
+        if not self.retired and self.age >= 60:
+            self.retired = True
+            self.employed = False
+            if self.employer:
+                self.employer.employees -= 1
+                self.employer.open_positions = max(0, self.employer.open_positions + 1)
+                self.employer = None
+            self.salary = 0.0
+
+        # 80岁死亡：财富以遗产税形式转移，政府金库扣除后分配给继承人
+        if self.age >= 80:
+            self._die()
+            return  # 死亡后不再执行任何行为（消费/投资/养老金等）
+
+        if self.retired:
+            # 退休者：领取政府养老金，不消费（储蓄为主）
+            pension = DEFAULTS.get("pension", 5.0)
+            self.model.ledger.transfer(self.model.government, self, pension)
+            self.pension_received = pension
+            self.update_wealth()
+            return  # 跳过以下 AI 行为
+
         # earn_wage() 现在由 Firm.pay_wages() 调用，此处不再调用
+        # ── 房地产：偿还按揭月供（违约 → 银行没收）──
+        if self.land is not None:
+            self.land.make_payment()
         self.pay_taxes()
         self.repay_loan()
         self.deposit()
@@ -1036,6 +1267,55 @@ class Household(Agent):
         self.update_wealth()
         self._consider_migration()
         self.consider_entrepreneurship()
+
+    def _die(self) -> None:
+        """
+        死亡：遗产税归政府，剩余转给随机继承人，标记死亡。
+
+        【关键】冻结死亡时刻的现金（不含同轮继承）：
+        场景：A 死，转给 B 遗产。A._die() 扣减 A.cash，B.cash 增加。
+        若 B 也死（age=80），B._die() 被调用时 self.cash 已含继承额，
+        导致 B 的遗嘱转移走的是含继承的金额。
+
+        正确做法：在 _die() 最开头，if self in _dying_this_round，
+        则使用冻结的 "死亡前现金"（继承发生前的值）。
+        """
+        # 若本轮将死，从冻结值恢复（该值在 hh.step() 开头 age>=80 时被记录）
+        if hasattr(self, '_frozen_cash') and getattr(self, '_frozen_cash', None) is not None:
+            initial_cash = self._frozen_cash
+            self._frozen_cash = None  # 清除，防止重用
+        else:
+            initial_cash = self.cash
+
+        if initial_cash <= 0:
+            self._dead = True
+            return
+
+        ESTATE_TAX = 0.15
+        total = initial_cash
+        tax = total * ESTATE_TAX
+        inheritance = total - tax
+
+        # 1. 遗产税 → 政府
+        self.model.ledger.transfer(self, self.model.government, tax)
+
+        # 2. 继承 → 随机一个本轮不死的居民
+        # 排除：自己 + 已死 + 同轮将死（age>=80）
+        this_round_dying = getattr(self.model, '_dying_this_round', set())
+        eligible = [h for h in self.model.households
+                   if h is not self
+                   and not getattr(h, '_dead', False)
+                   and h not in this_round_dying]
+        heir_target = self.model.government
+        if eligible and inheritance > 0:
+            heir = self.model.random.choice(eligible)
+            heir_target = heir
+        if inheritance > 0:
+            self.model.ledger.transfer(self, heir_target, inheritance,
+                                       memo=f"inheritance_to_{getattr(heir_target,'unique_id','GOVT')}",
+                                       allow_overdraft=True)
+
+        self._dead = True  # 标记死亡，等 Model 清理
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1153,6 +1433,7 @@ class Firm(Agent):
 
         # ── B2B 供应链（B2C 企业向 B2B 制造商购资本品）────────
         self.is_b2b = (self.industry == Industry.MANUFACTURING)
+        self.oil_cost_multiplier: float = 1.0  # 大宗商品成本乘数（RestOfWorld 冲击时↑）
         # 资本品库存（B2B 制造/B2C 采购）
         self.capital_goods_inventory: float = 200.0 if self.is_b2b else 0.0
         self.capital_goods_price: float = 15.0   # 资本品单价（参考通胀调整）
@@ -1265,6 +1546,7 @@ class Firm(Agent):
                 np.sqrt(max(1.0, self.capital_stock))
                 * T
                 * (max(1, self.employees) ** 0.6)
+                / max(1.0, self.oil_cost_multiplier)  # 油价冲击 ↑ → 产出 ↓（滞胀）
                 + self.random.gauss(0, noise_std)
             )
             # 资本折旧
@@ -2554,6 +2836,7 @@ class EconomyModel(Model):
         self.firms: list[Firm] = []
         self.banks: list[Bank] = []
         self.traders: list[Trader] = []
+        self._dying_this_round: set = set()   # 同轮将死亡HH集合（用于排除链式继承）
 
         # ── 市场状态 ───────────────────────────────────────
         self.stock_price: float = 100.0
@@ -2571,6 +2854,8 @@ class EconomyModel(Model):
         self.ledger = Ledger(self)
         # ── 同业拆借市场 ────────────────────────────────
         self.interbank_market = InterbankMarket(self)
+        # ── 大宗商品/外部世界 ──────────────────────────
+        self.row = RestOfWorld()
 
         # ── 股市流动性池（买方出资、卖方收款，M0 守恒） ───
         self._market_pool = _MarketPool()
@@ -2650,6 +2935,14 @@ class EconomyModel(Model):
             h = Household(self)
             self.agents.add(h)
             self.households.append(h)
+
+        # ── 房产初始化（总量 = n_hh / 2，均匀分配城市）──────────
+        Land._registry.clear()  # 防止重复初始化
+        n_land = max(1, n_hh // 2)
+        for i in range(n_land):
+            city = City.CITY_A if i < n_land // 2 else City.CITY_B
+            quality = 1 if i % 3 != 2 else 2  # 1/3 是优质房
+            Land(city, quality)
 
         # ── 玩家企业（第一个 Firm 是玩家控制的）────────────────
         self._pending_firm: dict = {}
@@ -2782,6 +3075,17 @@ class EconomyModel(Model):
             "interbank_volume": round(sum(self.interbank_market.interbank_loans.values()), 2),
             "interbank_defaults": len(self.interbank_market.defaults),
             "fear_premium": round(self.interbank_market.fear_premium, 4),
+            # ── 大宗商品 ─────────────────────────────────
+            "oil_price": round(self.row.oil_price, 2),
+            "commodity_index": round(self.row.commodity_price_index, 2),
+            # ── 房地产 ──────────────────────────────────
+            "avg_land_price": round(
+                sum(l.price for l in Land._registry) / max(1, len(Land._registry)), 2),
+            "n_landowners": sum(1 for l in Land._registry if l.owner is not None),
+            # ── 人口 ─────────────────────────────────────
+            "n_retired": sum(1 for h in self.households if getattr(h, "retired", False)),
+            "avg_age": round(sum(getattr(h, "age", 0) for h in self.households) /
+                             max(1, len(self.households)), 1),
         }
 
     def _checkpoint(self) -> None:
@@ -2813,6 +3117,9 @@ class EconomyModel(Model):
 
         # 0. 外部冲击
         self._apply_shock()
+
+        # 0a. 大宗商品/外部世界结算（油价冲击传导到制造业成本）
+        self.row.settle(self)
 
         # 1. 银行：调整利率 + 支付存款利息
         for bank in self.banks:
@@ -2860,8 +3167,42 @@ class EconomyModel(Model):
         #    注意：PlayerHousehold 重写 step() 不执行 AI 逻辑，
         #    只把自己的可选操作写入 _pending_player，等 UI 传来 decision 后
         #    在步骤 12 执行玩家决策（同帧生效，和 AI HH 同时结算）
-        for hh in self.households:
+        alive_hh = [hh for hh in self.households if not getattr(hh, "_dead", False)]
+        # 预标记本轮将死者：冻结其现金（继承发生前），排除在链式继承之外
+        self._dying_this_round = {hh for hh in alive_hh if hh.age >= 80}
+        for hh in self._dying_this_round:
+            hh._frozen_cash = hh.cash  # 冻结：不含同轮任何继承
+        for hh in alive_hh:
             hh.step()
+        self._dying_this_round.clear()  # 清除，供下一轮使用
+
+        # ── 人口替换：死亡居民 → 新生婴儿（代际更替）──
+        # 找出本轮在 alive_hh 中死亡的所有 HH
+        fresh_dead = [hh for hh in alive_hh if getattr(hh, "_dead", False)]
+        for hh in fresh_dead:
+            try:
+                self.agents.remove(hh)
+            except KeyError:
+                pass
+        # 过滤 households（处理本轮死者 + 任何残留死者）
+        self.households = [hh for hh in self.households if not getattr(hh, "_dead", False)]
+        n_dead = len(fresh_dead)
+        if n_dead > 0:
+            # 生成等量新生儿（20岁，随机城市）
+            # 政府每人补贴 20 元社会安置费（M0 守恒：govt ↓ = babies ↑）
+            baby_cash = 20.0
+            for _ in range(n_dead):
+                # 1. 先创建婴儿（初始现金=0，后续由 Ledger 转账注入）
+                baby = Household(self, initial_cash=0.0)
+                baby.age = 20
+                baby.retired = False
+                baby.employed = False
+                self.agents.add(baby)
+                self.households.append(baby)
+                # 2. 政府通过 Ledger 转账给婴儿（Layer 0 唯一合法通道）
+                self.ledger.transfer(self.government, baby, baby_cash,
+                                    memo=f"newborn_subsidy_to_HH{baby.unique_id}",
+                                    allow_overdraft=True)
 
         # 7. 银行处理消费贷（优先级低于运营贷）
         for bank in self.banks:
@@ -2879,6 +3220,9 @@ class EconomyModel(Model):
 
         # 10. SFC 资金守恒审计
         self.audit_sfc()
+
+        # 10a. 房地产市场动态定价（供给/需求/断供率驱动）
+        Land.update_market_price(self)
 
         # 11. 刷新运行时缓存
         self._refresh_cache()
@@ -3023,6 +3367,16 @@ class EconomyModel(Model):
         if callable(prod_delta):
             self.productivity = _clamp(prod_delta(self.productivity), 0.1, 5.0)
 
+        # ── 石油危机 → 大宗商品价格暴动 ────────────────────
+        if shock_type == Shock.OIL_CRISIS and hasattr(self, 'row'):
+            self.row.apply_external_shock("oil_crisis")
+            logger.warning("🛢 RestOfWorld: 油价暴涨 3 倍，持续 5 轮")
+
+        # ── 银行恐慌 → 同业拆借恐惧溢价螺旋 ────────────────
+        if shock_type == Shock.BANKING_PANIC and hasattr(self, 'interbank_market'):
+            self.interbank_market.fear_premium += 0.03  # +3% 恐惧溢价
+            logger.warning("🏦 InterbankMarket: fear_premium +3%，SHIBOR 将飙升")
+
         if effect.get("bank_run", False):
             self.systemic_risk = min(1.0, self.systemic_risk + 0.2)
             for b in self.banks:
@@ -3039,7 +3393,17 @@ class EconomyModel(Model):
 
     @property
     def health_score(self) -> float:
-        """经济健康分（0-100）"""
+        """
+        经济健康分（0-100），五项加权：
+          GDP达标率   (25分) | 失业率      (25分) | 基尼系数   (20分)
+          金融稳定    (15分) | 股市波动率  (15分)
+
+        解读：
+          90+   = 黄金时代（充分就业+低通胀+公平分配）
+          60-89 = 正常运行（有波动但可控）
+          30-59 = 黄色预警（滞胀或衰退风险）
+          <30   = 危机状态（大萧条级别）
+        """
         # GDP（偏离目标）：25分
         gdp_score = _clamp(self.gdp / DEFAULTS["gdp_target"], 0, 1) * 25
 
@@ -3070,10 +3434,17 @@ class EconomyModel(Model):
         logger.warning("⚡ 外部冲击触发：%s", effect["desc"])
         self.current_shock = effect["desc"]
 
+        # 大宗商品冲击（油价暴涨 → 制造业成本 ×3）
+        self.row.apply_external_shock(shock_type)
+
         # TFP 变化
         prod_delta = effect.get("productivity", None)
         if callable(prod_delta):
             self.productivity = _clamp(prod_delta(self.productivity), 0.1, 5.0)
+
+        # ── 银行恐慌 → 同业拆借恐惧溢价螺旋 ────────────────
+        if shock_type == Shock.BANKING_PANIC and hasattr(self, 'interbank_market'):
+            self.interbank_market.fear_premium += 0.03  # +3% 恐惧溢价
 
         # 银行恐慌：挤兑提取（银行储备→居民现金，M0 不变）—— 通过 Ledger
         if effect.get("bank_run", False):
@@ -3092,7 +3463,10 @@ class EconomyModel(Model):
         self.systemic_risk = min(1.0, self.systemic_risk + abs(sentiment) * 0.1)
 
     def _clear_markets(self) -> None:
-        """股市 + 物价清算"""
+        """股市 + 物价 + 房价清算"""
+        # ── 房价动态定价（供给/需求 + 断供冲击）────────────
+        Land.update_market_price(self)
+
         # ── 股市：戈登模型锚 + 供需扰动 + 系统风险 ─────────
         self.prev_stock_price = self.stock_price
 

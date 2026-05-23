@@ -18,3 +18,31 @@ env/
 
 # Gradio artifacts
 .gradio/
+
+# Checkpoints (huge pickle files)
+checkpoints/
+
+# Temp debug scripts
+_fresh_*.py
+_standalone_*.py
+_stress_*.py
+_verify_*.py
+_all_rounds.py
+_final.py
+_find_text.py
+_player.py
+_check.py
+_check2.py
+_snippet.txt
+_test_server.py
+_test_land.py
+
+# Runtime logs
+*.log
+_segfault.log
+
+# Task artifacts (local records)
+task-*.md
+task-summary*.md
+sfc-audit-report.md
+mesa-econ-cleanup*.md

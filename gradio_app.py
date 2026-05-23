@@ -1,5 +1,5 @@
 """
-经济沙盘 v5.2 — Gradio 版 (四方向全部完成)
+经济沙盘 v5.3 — Gradio 版 (四方向全部完成)
 方向一: 拉式信贷/资产负债表衰退 | 方向二: 国债市场/收益率曲线/CRT
 方向三: B2B供应链/牛鞭效应 | 方向四: 空间经济学/地租
 Run: python gradio_app.py
@@ -26,7 +26,7 @@ plt.rcParams["axes.unicode_minus"] = False
 
 import gradio as gr
 
-from model import EconomyModel, PlayerHousehold
+from model import EconomyModel, PlayerHousehold, Land, RestOfWorld
 
 # ── 全局仿真状态 ─────────────────────────────────────────────────
 _lock = threading.RLock()  # RLock: 可重入，防止 _rec/_snapshot 在 _lock 内递归死锁
@@ -38,17 +38,8 @@ _stop = threading.Event()
 _thr: Optional[threading.Thread] = None
 
 # ── 玩家决策缓存（跨 API 传递）─────────────────────────────────
-_player_options_cache: dict = {}  # 供 /api/player_options 读取
+_player_options_cache: dict = {}  # 供 PlayerHousehold.step() 写入
 _player_decision_ready: dict = {}  # 供 model.step() 末尾读取
-
-# ── 全局仿真状态 ─────────────────────────────────────────────────
-_lock = threading.RLock()  # RLock: 可重入，防止 _rec/_snapshot 在 _lock 内递归死锁
-_md: Optional[EconomyModel] = None
-_hist: list = []
-_hl = threading.Lock()
-_run = False
-_stop = threading.Event()
-_thr: Optional[threading.Thread] = None
 
 
 # ── 初始化 / 记录 / 播放循环 ─────────────────────────────────────
@@ -119,6 +110,20 @@ def _rec():
                 "fear_premium": round(
                     getattr(m, "interbank_market", None) and
                     m.interbank_market.fear_premium * 100 or 0, 2),
+                # ── 房地产 ─────────────────────────────────
+                "land_price": round(
+                    sum(l.price for l in Land._registry) / max(1, len(Land._registry)), 1),
+                "land_vacant": sum(1 for l in Land._registry if l.owner is None),
+                "land_foreclosed": sum(1 for l in Land._registry if l.foreclosed),
+                # ── 货币供应 ───────────────────────────────
+                "m0": round(
+                    sum(h.cash for h in m.households) + 
+                    sum(f.cash for f in m.firms) +
+                    sum(b.reserves for b in m.banks) +
+                    sum(t.cash for t in m.traders) +
+                    m.government.cash + m._market_pool.cash, 1),
+                "n_banks": len(m.banks),
+                "shock": getattr(m, "current_shock", ""),
             }
         except Exception:
             ent = {"cycle": getattr(_md, "cycle", 0)}
@@ -145,10 +150,10 @@ def _make_fig(hist_data: list) -> plt.Figure:
     charts = [
         ("GDP", "gdp", "#3b82f6"),
         ("失业率 (%)", "unemp", "#f59e0b"),
-        ("Gini 系数", "gini", "#8b5cf6"),
-        ("SHIBOR利率 (%)", "shibor", "#f97316"),
+        ("基尼系数", "gini", "#8b5cf6"),
+        ("市场利率 (%)", "mkt_rate", "#ef4444"),
+        ("房价指数", "land_price", "#f97316"),
         ("企业数量", "nfirms", "#10b981"),
-        ("银行坏账率 (%)", "bdr", "#ef4444"),
     ]
 
     cycles = [e["cycle"] for e in hist_data]
@@ -213,22 +218,28 @@ def _snapshot():
         last = hist[-1]
         score = last.get("score", 50)
         score_color = "#16a34a" if score >= 80 else "#f59e0b" if score >= 40 else "#ef4444"
+        # 冲击通知（当前轮刚触发的冲击）
+        shock = last.get("shock", "")
+        shock_banner = (
+            f"<div style='background:#fef2f2;border-left:4px solid #ef4444;padding:6px 12px;"
+            f"margin:8px 0;border-radius:4px;font-weight:600;color:#b91c1c'>"
+            f"⚡ {shock}</div>\n"
+        ) if shock else ""
+
         stats_md = (
-            f"## 经济沙盘 v5.2 &nbsp;&nbsp;"
+            f"## 经济沙盘 v5.3 &nbsp;&nbsp;"
             f"<span style='color:{score_color};font-size:28px;font-weight:800'>{score}</span>"
             f"<span style='color:#94a3b8;font-size:12px'> 健康分</span>\n\n"
-            f"**第 {last['cycle']} 轮** &nbsp;|&nbsp; "
-            f"GDP = **{last['gdp']:,}** &nbsp;|&nbsp; "
-            f"基尼 = **{last['gini']:.3f}** &nbsp;|&nbsp; "
-            f"企业 = **{last['nfirms']}** &nbsp;|&nbsp; "
-            f"失业率 = **{last['unemp']:.1f}%** &nbsp;|&nbsp; "
-            f"市场利率 ≈ **{last['mkt_rate']:.1f}%** *(涌现)* &nbsp;|&nbsp; "
-            f"SHIBOR ≈ **{last.get('shibor', 0):.2f}%**\n\n"
+            f"{shock_banner}"
+            f"**第 {last['cycle']} 轮** &nbsp;|&nbsp; GDP=**{last['gdp']:,}** &nbsp;|&nbsp; "
+            f"基尼=**{last['gini']:.3f}** &nbsp;|&nbsp; 企业=**{last['nfirms']}** &nbsp;|&nbsp; "
+            f"失业率=**{last['unemp']:.1f}%** &nbsp;|&nbsp; 利率=**{last['mkt_rate']:.1f}%** &nbsp;|&nbsp; "
+            f"房价=**{last.get('land_price', 0):.0f}** &nbsp;|&nbsp; M0=**{last.get('m0', 0):,.0f}**\n\n"
             f"🏙️ A城 {last['ca_pop']}人 GDP={last['ca_gdp']:,} 失业{last['ca_unemp']:.1f}% &nbsp;&nbsp;"
             f"🌆 B城 {last['cb_pop']}人 GDP={last['cb_gdp']:,} 失业{last['cb_unemp']:.1f}%"
         )
     else:
-        stats_md = "## 经济沙盘 v5.2\n\n*仿真未开始，点击「单步」或「开始」*"
+        stats_md = "## 经济沙盘 v5.3\n\n*仿真未开始，点击「单步」或「开始」*"
 
     macro_fig = _make_fig(hist)
     city_fig = _make_city_fig(hist)
@@ -474,6 +485,26 @@ def cb_fed_decision(action_type: str, delta: float = 0, amount: float = 0):
 
 
 
+def cb_export():
+    """导出历史数据为 CSV 文件"""
+    import csv, io, tempfile
+    with _hl:
+        hist = list(_hist)
+    if not hist:
+        return None
+    # 生成 CSV
+    keys = list(hist[0].keys())
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=keys)
+    w.writeheader()
+    w.writerows(hist)
+    # 写入临时文件供 Gradio 下载
+    path = tempfile.mktemp(suffix='_econ_sandbox.csv')
+    with open(path, 'w', encoding='utf-8-sig') as f:
+        f.write(buf.getvalue())
+    return path
+
+
 def cb_toggle():
     global _run, _thr, _stop
     _run = not _run
@@ -530,11 +561,11 @@ def cb_poll():
 
 # ── Gradio Blocks UI ─────────────────────────────────────────────
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="经济沙盘 v5.2 — 玩家模式") as demo:
+    with gr.Blocks(title="经济沙盘 v5.3 — 玩家模式") as demo:
 
         # ── 顶部状态栏 ──────────────────────────────────────────
         stats_md = gr.Markdown(
-            "## 经济沙盘 v5.2\n\n*初始化中...*",
+            "## 经济沙盘 v5.3\n\n*初始化中...*",
             elem_classes=["stat-header"],
         )
 
@@ -545,113 +576,117 @@ def build_ui() -> gr.Blocks:
             with gr.Column(scale=1, min_width=280):
                 gr.Markdown("### 经济参数")
 
-                sl_tax = gr.Slider(5, 30, value=15, step=1, label="税率 (%)")
-                sl_prod = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="生产率")
-                sl_gov = gr.Slider(0, 500, value=50, step=10, label="政府购买")
-                sl_sub = gr.Slider(0, 100, value=10, step=5, label="补贴")
-                sl_cg = gr.Slider(0, 50, value=10, step=5, label="资本利得税率 (%)")
+                with gr.Accordion("💰 宏观政策", open=True):
+                    sl_tax = gr.Slider(5, 30, value=15, step=1, label="税率 (%)",
+                        info="企业所得税率，影响企业盈利和政府收入")
+                    sl_prod = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="生产率 (TFP)",
+                        info="全要素生产率，1.0=基准，越高产出越多")
+                    sl_gov = gr.Slider(0, 500, value=50, step=10, label="政府购买",
+                        info="政府每轮采购金额，拉动总需求")
+                    sl_sub = gr.Slider(0, 100, value=10, step=5, label="失业补贴",
+                        info="失业居民每轮领取金额，防止需求塌缩")
+                    sl_cg = gr.Slider(0, 50, value=10, step=5, label="资本利得税率 (%)",
+                        info="股票买卖差价征税，抑制投机")
+                    all_sliders = [sl_tax, sl_prod, sl_gov, sl_sub, sl_cg]
 
-                gr.Markdown("#### 城市政策")
-                sl_cat = gr.Slider(5, 30, value=12, step=1, label="城市 A 税率 (%)")
-                sl_cbt = gr.Slider(5, 30, value=18, step=1, label="城市 B 税率 (%)")
+                with gr.Accordion("🏙️ 城市政策", open=True):
+                    sl_cat = gr.Slider(5, 30, value=12, step=1, label="城市 A 税率 (%)",
+                        info="A城（工业导向），低税吸引企业")
+                    sl_cbt = gr.Slider(5, 30, value=18, step=1, label="城市 B 税率 (%)",
+                        info="B城（科技导向），高税高福利")
+                    all_sliders += [sl_cat, sl_cbt]
 
-                all_sliders = [sl_tax, sl_prod, sl_gov, sl_sub, sl_cg, sl_cat, sl_cbt]
+                with gr.Accordion("🕹️ 控制台", open=True):
+                    with gr.Row():
+                        btn_toggle = gr.Button("▶ 开始", variant="primary", scale=2)
+                        btn_step = gr.Button("⏭ 单步", scale=1)
+                    with gr.Row():
+                        btn_apply = gr.Button("✅ 应用", variant="secondary", scale=1)
+                        btn_reset = gr.Button("🔄 重置", variant="stop", scale=1)
+                        btn_export = gr.Button("📥 导出", scale=1)
 
-                gr.Markdown("### 控制")
-                with gr.Row():
-                    btn_toggle = gr.Button("▶ 开始", variant="primary", scale=2)
-                    btn_step = gr.Button("⏭ 单步", scale=1)
-                with gr.Row():
-                    btn_apply = gr.Button("✅ 应用参数", variant="secondary", scale=1)
-                    btn_reset = gr.Button("🔄 重置", variant="stop", scale=1)
+                with gr.Accordion("⚡ 冲击注入", open=False):
+                    with gr.Row():
+                        btn_oil = gr.Button("🛢 石油危机", size="sm")
+                        btn_tech = gr.Button("💡 技术突破", size="sm")
+                    with gr.Row():
+                        btn_demand = gr.Button("📉 需求骤降", size="sm")
+                        btn_trade = gr.Button("⚔ 贸易战", size="sm")
+                    with gr.Row():
+                        btn_bank = gr.Button("🏦 银行恐慌", size="sm")
+                        btn_recovery = gr.Button("🌱 经济复苏", size="sm")
 
-                gr.Markdown("### 手动冲击")
-                with gr.Row():
-                    btn_oil = gr.Button("🛢 石油危机", size="sm")
-                    btn_tech = gr.Button("💡 技术突破", size="sm")
-                with gr.Row():
-                    btn_demand = gr.Button("📉 需求骤降", size="sm")
-                    btn_trade = gr.Button("⚔ 贸易战", size="sm")
-                with gr.Row():
-                    btn_bank = gr.Button("🏦 银行恐慌", size="sm")
-                    btn_recovery = gr.Button("🌱 经济复苏", size="sm")
+                # ── 玩家化身面板 ────────────────────────────
+                with gr.Accordion("👤 玩家化身", open=False):
+                    player_status_md = gr.Markdown("*启动后显示玩家状态*")
 
-                # ── 玩家化身面板 ────────────────────────────────────
-                gr.Markdown("### 👤 玩家化身")
-                player_status_md = gr.Markdown("*启动后显示玩家状态*")
+                    # 消费
+                    with gr.Row():
+                        sl_qty = gr.Number(value=1, minimum=1, maximum=10, step=1, label="购买数量", scale=1)
+                        sel_goods = gr.Dropdown(label="选择商品", choices=[], scale=2, interactive=True)
+                    with gr.Row():
+                        btn_consume = gr.Button("🛒 消费", variant="secondary", scale=1)
+                        btn_skip = gr.Button("⏭ 跳过本轮", scale=1)
 
-                # 消费
-                with gr.Row():
-                    sl_qty = gr.Number(value=1, minimum=1, maximum=10, step=1, label="购买数量", scale=1)
-                    sel_goods = gr.Dropdown(label="选择商品", choices=[], scale=2, interactive=True)
-                with gr.Row():
-                    btn_consume = gr.Button("🛒 消费", variant="secondary", scale=1)
-                    btn_skip = gr.Button("⏭ 跳过本轮", scale=1)
+                    # 股票
+                    with gr.Row():
+                        sl_shares = gr.Number(value=1, minimum=1, maximum=100, step=1, label="股数", scale=1)
+                    with gr.Row():
+                        btn_buy_stock = gr.Button("📈 买入", scale=1)
+                        btn_sell_stock = gr.Button("📉 卖出", scale=1)
 
-                # 股票
-                with gr.Row():
-                    sl_shares = gr.Number(value=1, minimum=1, maximum=100, step=1, label="股数", scale=1)
-                with gr.Row():
-                    btn_buy_stock = gr.Button("📈 买入股票", scale=1)
-                    btn_sell_stock = gr.Button("📉 卖出股票", scale=1)
+                    # 跳槽
+                    sel_job = gr.Dropdown(label="接受工作 offer", choices=[], interactive=True)
+                    btn_accept_job = gr.Button("💼 跳槽", variant="primary", scale=1)
+                    player_feedback = gr.Textbox(label="操作反馈", interactive=False, lines=2)
 
-                # 跳槽
-                sel_job = gr.Dropdown(label="接受工作 offer", choices=[], interactive=True)
-                btn_accept_job = gr.Button("💼 跳槽", variant="primary", scale=1)
+                # ── 玩家企业面板 ────────────────────────────────
+                with gr.Accordion("🏭 玩家企业", open=False):
+                    firm_status_md = gr.Markdown("*启动后显示企业状态*")
 
-                player_feedback = gr.Textbox(label="操作反馈", interactive=False, lines=2)
+                    with gr.Row():
+                        sl_price = gr.Number(value=10, minimum=1, maximum=100, step=1, label="商品定价", scale=1)
+                        sl_wage = gr.Number(value=8, minimum=1, maximum=50, step=0.5, label="工资标准", scale=1)
+                    with gr.Row():
+                        btn_set_price = gr.Button("💰 调价", scale=1)
+                        btn_set_wage = gr.Button("💵 调薪", scale=1)
 
-                # ── 玩家企业面板 ────────────────────────────────────
-                gr.Markdown("### 🏭 玩家企业")
-                firm_status_md = gr.Markdown("*启动后显示企业状态*")
+                    with gr.Row():
+                        sl_positions = gr.Number(value=2, minimum=0, maximum=20, step=1, label="招聘名额", scale=1)
+                        sl_fire = gr.Number(value=0, minimum=0, maximum=10, step=1, label="裁员人数", scale=1)
+                    with gr.Row():
+                        btn_hire = gr.Button("➕ 招人", scale=1)
+                        btn_fire = gr.Button("➖ 裁员", scale=1)
+                        btn_open_pos = gr.Button("📋 开职位", scale=1)
 
-                with gr.Row():
-                    sl_price = gr.Number(value=10, minimum=1, maximum=100, step=1, label="商品定价", scale=1)
-                    sl_wage = gr.Number(value=8, minimum=1, maximum=50, step=0.5, label="工资标准", scale=1)
-                with gr.Row():
-                    btn_set_price = gr.Button("💰 调价", scale=1)
-                    btn_set_wage = gr.Button("💵 调薪", scale=1)
+                    with gr.Row():
+                        sl_dividend = gr.Number(value=0, minimum=0, maximum=5, step=0.1, label="每股分红", scale=1)
+                    btn_dividend = gr.Button("📊 设分红", scale=1)
+                    firm_feedback = gr.Textbox(label="企业反馈", interactive=False, lines=2)
 
-                with gr.Row():
-                    sl_positions = gr.Number(value=2, minimum=0, maximum=20, step=1, label="招聘名额", scale=1)
-                    sl_fire = gr.Number(value=0, minimum=0, maximum=10, step=1, label="裁员人数", scale=1)
-                with gr.Row():
-                    btn_hire = gr.Button("➕ 招人", scale=1)
-                    btn_fire = gr.Button("➖ 裁员", scale=1)
-                    btn_open_pos = gr.Button("📋 开职位", scale=1)
+                # ── 市长面板 ─────────────────────────────────────
+                with gr.Accordion("🏛️ 市长控制", open=False):
+                    mayor_status_md = gr.Markdown("*财富≥1000 & 员工≥5 解锁*")
+                    with gr.Row():
+                        sl_city_tax_a = gr.Number(value=12, minimum=5, maximum=40, step=1, label="A城税率%", scale=1)
+                        sl_city_tax_b = gr.Number(value=18, minimum=5, maximum=40, step=1, label="B城税率%", scale=1)
+                    with gr.Row():
+                        sl_city_sub_a = gr.Number(value=10, minimum=0, maximum=100, step=5, label="A城补贴", scale=1)
+                        sl_city_sub_b = gr.Number(value=5, minimum=0, maximum=100, step=5, label="B城补贴", scale=1)
+                    with gr.Row():
+                        btn_city_tax = gr.Button("🏛️ 设税率", scale=1)
+                        btn_city_sub = gr.Button("🏛️ 设补贴", scale=1)
 
-                with gr.Row():
-                    sl_dividend = gr.Number(value=0, minimum=0, maximum=5, step=0.1, label="每股分红", scale=1)
-                btn_dividend = gr.Button("📊 设分红", scale=1)
-
-                firm_feedback = gr.Textbox(label="企业反馈", interactive=False, lines=2)
-
-                # ── 市长面板（需 ENTREPRENEUR+）────────────────────
-                gr.Markdown("### 🏛️ 市长控制")
-                mayor_status_md = gr.Markdown("*财富≥1000 & 员工≥5 解锁*")
-
-                with gr.Row():
-                    sl_city_tax_a = gr.Number(value=12, minimum=5, maximum=40, step=1, label="A城税率%", scale=1)
-                    sl_city_tax_b = gr.Number(value=18, minimum=5, maximum=40, step=1, label="B城税率%", scale=1)
-                with gr.Row():
-                    sl_city_sub_a = gr.Number(value=10, minimum=0, maximum=100, step=5, label="A城补贴", scale=1)
-                    sl_city_sub_b = gr.Number(value=5, minimum=0, maximum=100, step=5, label="B城补贴", scale=1)
-                with gr.Row():
-                    btn_city_tax = gr.Button("🏛️ 设税率", scale=1)
-                    btn_city_sub = gr.Button("🏛️ 设补贴", scale=1)
-
-                # ── 美联储面板（需 MAYOR+）────────────────────────
-                gr.Markdown("### 🏦 美联储控制")
-                fed_status_md = gr.Markdown("*财富≥5000 & 员工≥10 解锁*")
-
-                with gr.Row():
-                    sl_rate_delta = gr.Number(value=0.01, minimum=-0.05, maximum=0.05, step=0.005, label="利率调整", scale=1)
-                    sl_qe = gr.Number(value=100, minimum=0, maximum=1000, step=50, label="QE金额", scale=1)
-                with gr.Row():
-                    btn_rate = gr.Button("🏦 调利率", scale=1)
-                    btn_qe = gr.Button("🏦 量化宽松", scale=1)
-
-                mayor_fed_feedback = gr.Textbox(label="政策反馈", interactive=False, lines=2)
+                # ── 美联储面板 ───────────────────────────────────
+                with gr.Accordion("🏦 美联储", open=False):
+                    fed_status_md = gr.Markdown("*财富≥5000 & 员工≥10 解锁*")
+                    with gr.Row():
+                        sl_rate_delta = gr.Number(value=0.01, minimum=-0.05, maximum=0.05, step=0.005, label="利率调整", scale=1)
+                        sl_qe = gr.Number(value=100, minimum=0, maximum=1000, step=50, label="QE金额", scale=1)
+                    with gr.Row():
+                        btn_rate = gr.Button("🏦 调利率", scale=1)
+                        btn_qe = gr.Button("🏦 量化宽松", scale=1)
+                    mayor_fed_feedback = gr.Textbox(label="政策反馈", interactive=False, lines=2)
 
             # ── 右侧：图表面板 ──────────────────────────────────
             with gr.Column(scale=3):
@@ -674,11 +709,15 @@ def build_ui() -> gr.Blocks:
         timer.tick(fn=cb_player_options, outputs=[sel_goods, sel_job])
         timer.tick(fn=cb_firm_status, outputs=[firm_status_md])
 
+        # 导出组件（隐藏，由按钮触发）
+        export_file = gr.File(label="下载数据", visible=False)
+
         # 控制按钮
         btn_step.click(fn=cb_step, outputs=outputs)
         btn_toggle.click(fn=cb_toggle, outputs=[btn_toggle] + outputs)
         btn_reset.click(fn=cb_reset, outputs=[btn_toggle] + outputs)
         btn_apply.click(fn=cb_apply, inputs=all_sliders, outputs=outputs)
+        btn_export.click(fn=cb_export, outputs=[export_file])
 
         # 玩家居民操作
         btn_consume.click(
